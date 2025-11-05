@@ -5,39 +5,29 @@ import random
 from pulp import LpProblem, LpVariable, LpMinimize, lpSum, LpStatus, value
 
 # -----------------------------
-# Optimization model using PuLP
+# Optimization Model
 # -----------------------------
 def berth_allocation_optimization(vessels, berth_length):
-    """
-    Solve berth allocation problem using linear optimization.
-    Objective: minimize total deviation from ETA while avoiding overlap.
-    """
-
-    n = len(vessels)
     model = LpProblem("Berth_Allocation", LpMinimize)
 
-    # Decision variables
     start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length) for v in vessels}
     delay = {v["name"]: LpVariable(f"delay_{v['name']}", lowBound=0) for v in vessels}
 
     # Objective: minimize total delay
     model += lpSum(delay[v["name"]] for v in vessels)
 
-    # Constraints
     for i, vi in enumerate(vessels):
         li = vi["length"]
-        eta_i = int(vi["eta"].split(":")[0])  # approximate ETA hour
+        eta_i = int(vi["eta"].split(":")[0])  # hour-based ETA
         model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
-        model += delay[vi["name"]] >= start[vi["name"]] - eta_i * 10  # simple proportional delay
+        model += delay[vi["name"]] >= start[vi["name"]] - eta_i * 10
 
-        # No overlap between vessels
         for j, vj in enumerate(vessels):
             if i >= j:
                 continue
             lj = vj["length"]
-            M = berth_length * 2  # large number for constraint relaxation
+            M = berth_length * 2
             y_ij = LpVariable(f"y_{vi['name']}_{vj['name']}", cat="Binary")
-            # Either vessel i is before j or vice versa
             model += start[vi["name"]] + li <= start[vj["name"]] + M * (1 - y_ij)
             model += start[vj["name"]] + lj <= start[vi["name"]] + M * y_ij
 
@@ -51,6 +41,7 @@ def berth_allocation_optimization(vessels, berth_length):
     for v in vessels:
         allocations.append({
             "name": v["name"],
+            "type": v["type"],
             "length": v["length"],
             "eta": v["eta"],
             "etd": v["etd"],
@@ -72,7 +63,6 @@ def plot_berth_allocation(allocations, berth_length):
     ax.set_xlabel("Berth Position (m)")
     ax.set_ylabel("Berth Line")
 
-    # Draw berth line
     ax.hlines(0, 0, berth_length, colors='black', linewidth=3)
 
     for idx, alloc in enumerate(allocations):
@@ -86,44 +76,63 @@ def plot_berth_allocation(allocations, berth_length):
         ax.add_patch(rect)
 
         mid_x = (start + end) / 2
-        ax.text(mid_x, y_pos + 0.7, f"🚢 {alloc['name']}", ha='center', va='bottom', fontsize=9, weight='bold')
-        ax.text(mid_x, y_pos - 1.0, f"ETA:{alloc['eta']} | Delay:{alloc['delay']:.1f}",
+        ax.text(mid_x, y_pos + 0.7, f"🚢 {alloc['name']} ({alloc['type']})", 
+                ha='center', va='bottom', fontsize=9, weight='bold')
+        ax.text(mid_x, y_pos - 1.0, f"ETA:{alloc['eta']} | Delay:{alloc['delay']:.1f}", 
                 ha='center', va='top', fontsize=8, color='gray')
 
     st.pyplot(fig)
 
 
 # -----------------------------
+# Random Data Generator
+# -----------------------------
+def generate_random_vessels(num_vessels):
+    vessel_types = ["Container", "Bulk", "Tanker", "RORO", "Passenger"]
+    vessels = []
+    for i in range(num_vessels):
+        vtype = random.choice(vessel_types)
+        length = random.randint(50, 250)
+        eta_hour = random.randint(1, 24)
+        etd_hour = eta_hour + random.randint(4, 12)
+        vessels.append({
+            "name": f"Vessel_{i+1}",
+            "type": vtype,
+            "length": length,
+            "eta": f"{eta_hour}:00",
+            "etd": f"{etd_hour}:00"
+        })
+    return vessels
+
+
+# -----------------------------
 # Streamlit UI
 # -----------------------------
-st.title("🚢 Berth Allocation Optimization with PuLP")
+st.title("🚢 Berth Allocation Optimization with Random Data (PuLP)")
 
-st.sidebar.header("Input Parameters")
+st.sidebar.header("Simulation Settings")
+num_vessels = st.sidebar.slider("Number of Vessels", 3, 15, 6)
+berth_length = st.sidebar.slider("Total Berth Length (m)", 200, 2000, 800, step=100)
 
-num_vessels = st.sidebar.number_input("Number of Vessels", min_value=1, max_value=20, value=5, step=1)
-berth_length = st.sidebar.number_input("Total Berth Length (m)", min_value=100, max_value=2000, value=500, step=50)
+st.write("Click the button below to generate random vessel data and run optimization:")
 
-vessels = []
-for i in range(num_vessels):
-    with st.expander(f"Vessel {i+1}"):
-        name = st.text_input(f"Name of Vessel {i+1}", value=f"Vessel_{i+1}", key=f"name_{i}")
-        length = st.number_input(f"Length (m)", min_value=10, max_value=300, value=random.randint(50, 150), key=f"len_{i}")
-        eta = st.text_input(f"ETA (hour:00)", value=f"{random.randint(1,24)}:00", key=f"eta_{i}")
-        etd = st.text_input(f"ETD (hour:00)", value=f"{random.randint(25,48)}:00", key=f"etd_{i}")
-        vessels.append({"name": name, "length": length, "eta": eta, "etd": etd})
+if st.button("🎲 Generate & Optimize"):
+    vessels = generate_random_vessels(num_vessels)
+    st.subheader("Generated Vessel Data")
+    st.dataframe(vessels)
 
-if st.button("Run Optimization"):
     allocations = berth_allocation_optimization(vessels, berth_length)
     if allocations:
         st.success("✅ Optimization completed successfully")
-        plot_berth_allocation(allocations, berth_length)
-        st.subheader("Allocation Results")
+        st.subheader("Optimized Allocation Results")
         st.dataframe(allocations)
+        plot_berth_allocation(allocations, berth_length)
     else:
-        st.error("No feasible allocation found.")
+        st.error("❌ No feasible allocation found. Try adjusting parameters.")
 
 st.markdown("---")
-st.caption("Developed for berth scheduling research | Streamlit + PuLP + Matplotlib")
+st.caption("Developed for berth scheduling research | Random data + PuLP + Streamlit")
+
 
 
 # import streamlit as st
@@ -287,4 +296,5 @@ st.caption("Developed for berth scheduling research | Streamlit + PuLP + Matplot
 #     ax.set_title("Vessel Assignments on Cartesian Coordinate System")
 #     ax.grid(True)
 #     st.pyplot(fig)
+
 
