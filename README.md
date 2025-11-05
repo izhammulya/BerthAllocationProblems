@@ -32,3 +32,42 @@ d_i = delay of vessel i (hours)
 s_i = scaled start time of vessel i (hours)
 t_i = ETA of vessel i (hours)
 C = conversion factor (50 meters/hour)
+
+
+#Rule-based
+START
+  │
+  ▼
+Sort vessels by ETA (ascending)
+  │
+  ▼
+For each vessel in sorted order:
+  │
+  ▼
+Determine search range:
+  │─ If Container → Use constraint min/max
+  │─ Else → Use full berth range
+  │
+  ▼
+Start from minimum position
+  │
+  ▼
+Check for overlaps with existing vessels
+  │
+  ▼
+If no overlap → ALLOCATE at current position
+  │
+  ▼
+If overlap → Move to next position (+5m gap)
+  │
+  ▼
+If no position found → Place at end of berth
+  │
+  ▼
+Continue until all vessels allocated
+  │
+  ▼
+Calculate delays based on actual positions
+  │
+  ▼
+END
