@@ -1,161 +1,290 @@
 import streamlit as st
-import pulp
-import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 import random
-
-st.set_page_config(page_title="Berth Allocation Problem", layout="wide")
-
-st.title("⚓ Berth Allocation Problem with Vessel Variations")
-st.markdown("Define vessels, berths, and run the optimization interactively.")
+from pulp import LpProblem, LpVariable, LpMinimize, lpSum, LpStatus, value
 
 # -----------------------------
-# Sidebar Inputs
+# Optimization model using PuLP
 # -----------------------------
-st.sidebar.header("Simulation Parameters")
+def berth_allocation_optimization(vessels, berth_length):
+    """
+    Solve berth allocation problem using linear optimization.
+    Objective: minimize total deviation from ETA while avoiding overlap.
+    """
 
-n_vessels = st.sidebar.number_input("Number of Vessels", 1, 10, 4)
-n_berths = st.sidebar.number_input("Number of Berths", 1, 10, 3)
+    n = len(vessels)
+    model = LpProblem("Berth_Allocation", LpMinimize)
 
-st.sidebar.markdown("---")
-st.sidebar.header("Generate Random Example (optional)")
-randomize = st.sidebar.checkbox("Generate Random Data")
+    # Decision variables
+    start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length) for v in vessels}
+    delay = {v["name"]: LpVariable(f"delay_{v['name']}", lowBound=0) for v in vessels}
 
-# -----------------------------
-# Input Tables
-# -----------------------------
-if randomize:
-    vessel_data = pd.DataFrame({
-        "Vessel": [f"V{i+1}" for i in range(n_vessels)],
-        "ArrivalTime": [random.randint(0, 5) for _ in range(n_vessels)],
-        "HandlingTime": [random.randint(2, 5) for _ in range(n_vessels)],
-        "Type": random.choices(["Container", "Bulk", "Tanker"], k=n_vessels)
-    })
-    berth_data = pd.DataFrame({
-        "Berth": [f"B{i+1}" for i in range(n_berths)],
-        "OpenTime": [0 for _ in range(n_berths)],
-        "CloseTime": [15 for _ in range(n_berths)],
-        "AllowedTypes": [",".join(random.sample(["Container", "Bulk", "Tanker"], random.randint(2,3))) for _ in range(n_berths)],
-        "X": [i*10 for i in range(n_berths)],
-        "Y": [0 for _ in range(n_berths)]
-    })
-else:
-    st.subheader("🛳️ Vessel Data")
-    vessel_data = st.data_editor(pd.DataFrame({
-        "Vessel": [f"V{i+1}" for i in range(n_vessels)],
-        "ArrivalTime": [0]*n_vessels,
-        "HandlingTime": [0]*n_vessels,
-        "Type": ["Container"]*n_vessels
-    }), key="vessel_editor")
-
-    st.subheader("🏗️ Berth Data")
-    berth_data = st.data_editor(pd.DataFrame({
-        "Berth": [f"B{i+1}" for i in range(n_berths)],
-        "OpenTime": [0]*n_berths,
-        "CloseTime": [15]*n_berths,
-        "AllowedTypes": ["Container,Bulk,Tanker"]*n_berths,
-        "X": [i*10 for i in range(n_berths)],
-        "Y": [0]*n_berths
-    }), key="berth_editor")
-
-# -----------------------------
-# Solve Optimization
-# -----------------------------
-if st.button("🚀 Solve Berth Allocation"):
-    vessels = vessel_data["Vessel"].tolist()
-    berths = berth_data["Berth"].tolist()
-
-    arrival_time = dict(zip(vessel_data["Vessel"], vessel_data["ArrivalTime"]))
-    handling_time = dict(zip(vessel_data["Vessel"], vessel_data["HandlingTime"]))
-    vessel_type = dict(zip(vessel_data["Vessel"], vessel_data["Type"]))
-
-    berth_open = dict(zip(berth_data["Berth"], berth_data["OpenTime"]))
-    berth_close = dict(zip(berth_data["Berth"], berth_data["CloseTime"]))
-    berth_coord = dict(zip(berth_data["Berth"], zip(berth_data["X"], berth_data["Y"])))
-
-    compatible_berth = {
-        b: berth_data.loc[i, "AllowedTypes"].split(",") for i, b in enumerate(berths)
-    }
-
-    # Model
-    model = pulp.LpProblem("Berth_Allocation_Problem", pulp.LpMinimize)
-    x = pulp.LpVariable.dicts("Assign", [(v, b) for v in vessels for b in berths], cat='Binary')
-    start_time = pulp.LpVariable.dicts("StartTime", vessels, lowBound=0)
-
-    # Objective: minimize total departure time
-    model += pulp.lpSum([start_time[v] + handling_time[v] for v in vessels])
+    # Objective: minimize total delay
+    model += lpSum(delay[v["name"]] for v in vessels)
 
     # Constraints
+    for i, vi in enumerate(vessels):
+        li = vi["length"]
+        eta_i = int(vi["eta"].split(":")[0])  # approximate ETA hour
+        model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
+        model += delay[vi["name"]] >= start[vi["name"]] - eta_i * 10  # simple proportional delay
+
+        # No overlap between vessels
+        for j, vj in enumerate(vessels):
+            if i >= j:
+                continue
+            lj = vj["length"]
+            M = berth_length * 2  # large number for constraint relaxation
+            y_ij = LpVariable(f"y_{vi['name']}_{vj['name']}", cat="Binary")
+            # Either vessel i is before j or vice versa
+            model += start[vi["name"]] + li <= start[vj["name"]] + M * (1 - y_ij)
+            model += start[vj["name"]] + lj <= start[vi["name"]] + M * y_ij
+
+    model.solve()
+
+    if LpStatus[model.status] != "Optimal":
+        st.warning("⚠️ Optimization did not find an optimal solution.")
+        return []
+
+    allocations = []
     for v in vessels:
-        model += pulp.lpSum([x[(v, b)] for b in berths]) == 1
+        allocations.append({
+            "name": v["name"],
+            "length": v["length"],
+            "eta": v["eta"],
+            "etd": v["etd"],
+            "start": value(start[v["name"]]),
+            "end": value(start[v["name"]]) + v["length"],
+            "delay": value(delay[v["name"]])
+        })
+    return allocations
 
-    for v in vessels:
-        for b in berths:
-            if vessel_type[v] not in compatible_berth[b]:
-                model += x[(v, b)] == 0
 
-    for v in vessels:
-        model += start_time[v] >= arrival_time[v]
+# -----------------------------
+# Visualization
+# -----------------------------
+def plot_berth_allocation(allocations, berth_length):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.set_xlim(0, berth_length)
+    ax.set_ylim(0, 20)
+    ax.set_title("Optimized Berth Allocation (PuLP)", fontsize=16)
+    ax.set_xlabel("Berth Position (m)")
+    ax.set_ylabel("Berth Line")
 
-    M = 1e5
-    for b in berths:
-        for v1 in vessels:
-            for v2 in vessels:
-                if v1 != v2:
-                    model += start_time[v1] + handling_time[v1] <= start_time[v2] + M * (1 - x[(v1, b)] + 1 - x[(v2, b)])
-                    model += start_time[v2] + handling_time[v2] <= start_time[v1] + M * (1 - x[(v1, b)] + 1 - x[(v2, b)])
+    # Draw berth line
+    ax.hlines(0, 0, berth_length, colors='black', linewidth=3)
 
-    for v in vessels:
-        for b in berths:
-            model += start_time[v] >= berth_open[b] - (1 - x[(v, b)]) * 1e6
-            model += start_time[v] + handling_time[v] <= berth_close[b] + (1 - x[(v, b)]) * 1e6
+    for idx, alloc in enumerate(allocations):
+        start = alloc["start"]
+        end = alloc["end"]
+        y_pos = 5 + idx * 2.5
+        ship_length = end - start
 
-    model.solve(pulp.PULP_CBC_CMD(msg=0))
+        rect = plt.Rectangle((start, y_pos - 0.5), ship_length, 1.0,
+                             color=np.random.rand(3,), alpha=0.7)
+        ax.add_patch(rect)
 
-    # -----------------------------
-    # Output Results
-    # -----------------------------
-    st.success(f"Optimization completed! Status: {pulp.LpStatus[model.status]}")
+        mid_x = (start + end) / 2
+        ax.text(mid_x, y_pos + 0.7, f"🚢 {alloc['name']}", ha='center', va='bottom', fontsize=9, weight='bold')
+        ax.text(mid_x, y_pos - 1.0, f"ETA:{alloc['eta']} | Delay:{alloc['delay']:.1f}",
+                ha='center', va='top', fontsize=8, color='gray')
 
-    results = []
-    for v in vessels:
-        for b in berths:
-            if pulp.value(x[(v, b)]) > 0.5:
-                results.append({
-                    "Vessel": v,
-                    "Berth": b,
-                    "Start": pulp.value(start_time[v]),
-                    "Finish": pulp.value(start_time[v]) + handling_time[v],
-                    "Type": vessel_type[v]
-                })
-
-    df_result = pd.DataFrame(results)
-    st.subheader("📊 Allocation Results")
-    st.dataframe(df_result)
-
-    # -----------------------------
-    # Cartesian Visualization
-    # -----------------------------
-    st.subheader("🧭 Berth Layout Simulation (Cartesian View)")
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-
-    # Plot berths
-    for b, (x_coord, y_coord) in berth_coord.items():
-        ax.plot(x_coord, y_coord, "s", markersize=12, label=f"{b}")
-        ax.text(x_coord, y_coord - 0.5, b, ha='center', va='top', fontsize=9, color='blue')
-
-    colors = {"Container": "orange", "Bulk": "green", "Tanker": "red"}
-
-    # Plot vessels near their assigned berth
-    for _, row in df_result.iterrows():
-        bx, by = berth_coord[row["Berth"]]
-        ax.plot(bx, by + 1, "o", color=colors[row["Type"]])
-        ax.text(bx, by + 1.2, f"{row['Vessel']} ({row['Start']:.1f}-{row['Finish']:.1f})",
-                ha='center', fontsize=8, color=colors[row["Type"]])
-
-    ax.set_xlabel("X (Berth position)")
-    ax.set_ylabel("Y (Dock line)")
-    ax.set_title("Vessel Assignments on Cartesian Coordinate System")
-    ax.grid(True)
     st.pyplot(fig)
+
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+st.title("🚢 Berth Allocation Optimization with PuLP")
+
+st.sidebar.header("Input Parameters")
+
+num_vessels = st.sidebar.number_input("Number of Vessels", min_value=1, max_value=20, value=5, step=1)
+berth_length = st.sidebar.number_input("Total Berth Length (m)", min_value=100, max_value=2000, value=500, step=50)
+
+vessels = []
+for i in range(num_vessels):
+    with st.expander(f"Vessel {i+1}"):
+        name = st.text_input(f"Name of Vessel {i+1}", value=f"Vessel_{i+1}", key=f"name_{i}")
+        length = st.number_input(f"Length (m)", min_value=10, max_value=300, value=random.randint(50, 150), key=f"len_{i}")
+        eta = st.text_input(f"ETA (hour:00)", value=f"{random.randint(1,24)}:00", key=f"eta_{i}")
+        etd = st.text_input(f"ETD (hour:00)", value=f"{random.randint(25,48)}:00", key=f"etd_{i}")
+        vessels.append({"name": name, "length": length, "eta": eta, "etd": etd})
+
+if st.button("Run Optimization"):
+    allocations = berth_allocation_optimization(vessels, berth_length)
+    if allocations:
+        st.success("✅ Optimization completed successfully")
+        plot_berth_allocation(allocations, berth_length)
+        st.subheader("Allocation Results")
+        st.dataframe(allocations)
+    else:
+        st.error("No feasible allocation found.")
+
+st.markdown("---")
+st.caption("Developed for berth scheduling research | Streamlit + PuLP + Matplotlib")
+
+
+# import streamlit as st
+# import pulp
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# import random
+
+# st.set_page_config(page_title="Berth Allocation Problem", layout="wide")
+
+# st.title("⚓ Berth Allocation Problem with Vessel Variations")
+# st.markdown("Define vessels, berths, and run the optimization interactively.")
+
+# # -----------------------------
+# # Sidebar Inputs
+# # -----------------------------
+# st.sidebar.header("Simulation Parameters")
+
+# n_vessels = st.sidebar.number_input("Number of Vessels", 1, 10, 4)
+# n_berths = st.sidebar.number_input("Number of Berths", 1, 10, 3)
+
+# st.sidebar.markdown("---")
+# st.sidebar.header("Generate Random Example (optional)")
+# randomize = st.sidebar.checkbox("Generate Random Data")
+
+# # -----------------------------
+# # Input Tables
+# # -----------------------------
+# if randomize:
+#     vessel_data = pd.DataFrame({
+#         "Vessel": [f"V{i+1}" for i in range(n_vessels)],
+#         "ArrivalTime": [random.randint(0, 5) for _ in range(n_vessels)],
+#         "HandlingTime": [random.randint(2, 5) for _ in range(n_vessels)],
+#         "Type": random.choices(["Container", "Bulk", "Tanker"], k=n_vessels)
+#     })
+#     berth_data = pd.DataFrame({
+#         "Berth": [f"B{i+1}" for i in range(n_berths)],
+#         "OpenTime": [0 for _ in range(n_berths)],
+#         "CloseTime": [15 for _ in range(n_berths)],
+#         "AllowedTypes": [",".join(random.sample(["Container", "Bulk", "Tanker"], random.randint(2,3))) for _ in range(n_berths)],
+#         "X": [i*10 for i in range(n_berths)],
+#         "Y": [0 for _ in range(n_berths)]
+#     })
+# else:
+#     st.subheader("🛳️ Vessel Data")
+#     vessel_data = st.data_editor(pd.DataFrame({
+#         "Vessel": [f"V{i+1}" for i in range(n_vessels)],
+#         "ArrivalTime": [0]*n_vessels,
+#         "HandlingTime": [0]*n_vessels,
+#         "Type": ["Container"]*n_vessels
+#     }), key="vessel_editor")
+
+#     st.subheader("🏗️ Berth Data")
+#     berth_data = st.data_editor(pd.DataFrame({
+#         "Berth": [f"B{i+1}" for i in range(n_berths)],
+#         "OpenTime": [0]*n_berths,
+#         "CloseTime": [15]*n_berths,
+#         "AllowedTypes": ["Container,Bulk,Tanker"]*n_berths,
+#         "X": [i*10 for i in range(n_berths)],
+#         "Y": [0]*n_berths
+#     }), key="berth_editor")
+
+# # -----------------------------
+# # Solve Optimization
+# # -----------------------------
+# if st.button("🚀 Solve Berth Allocation"):
+#     vessels = vessel_data["Vessel"].tolist()
+#     berths = berth_data["Berth"].tolist()
+
+#     arrival_time = dict(zip(vessel_data["Vessel"], vessel_data["ArrivalTime"]))
+#     handling_time = dict(zip(vessel_data["Vessel"], vessel_data["HandlingTime"]))
+#     vessel_type = dict(zip(vessel_data["Vessel"], vessel_data["Type"]))
+
+#     berth_open = dict(zip(berth_data["Berth"], berth_data["OpenTime"]))
+#     berth_close = dict(zip(berth_data["Berth"], berth_data["CloseTime"]))
+#     berth_coord = dict(zip(berth_data["Berth"], zip(berth_data["X"], berth_data["Y"])))
+
+#     compatible_berth = {
+#         b: berth_data.loc[i, "AllowedTypes"].split(",") for i, b in enumerate(berths)
+#     }
+
+#     # Model
+#     model = pulp.LpProblem("Berth_Allocation_Problem", pulp.LpMinimize)
+#     x = pulp.LpVariable.dicts("Assign", [(v, b) for v in vessels for b in berths], cat='Binary')
+#     start_time = pulp.LpVariable.dicts("StartTime", vessels, lowBound=0)
+
+#     # Objective: minimize total departure time
+#     model += pulp.lpSum([start_time[v] + handling_time[v] for v in vessels])
+
+#     # Constraints
+#     for v in vessels:
+#         model += pulp.lpSum([x[(v, b)] for b in berths]) == 1
+
+#     for v in vessels:
+#         for b in berths:
+#             if vessel_type[v] not in compatible_berth[b]:
+#                 model += x[(v, b)] == 0
+
+#     for v in vessels:
+#         model += start_time[v] >= arrival_time[v]
+
+#     M = 1e5
+#     for b in berths:
+#         for v1 in vessels:
+#             for v2 in vessels:
+#                 if v1 != v2:
+#                     model += start_time[v1] + handling_time[v1] <= start_time[v2] + M * (1 - x[(v1, b)] + 1 - x[(v2, b)])
+#                     model += start_time[v2] + handling_time[v2] <= start_time[v1] + M * (1 - x[(v1, b)] + 1 - x[(v2, b)])
+
+#     for v in vessels:
+#         for b in berths:
+#             model += start_time[v] >= berth_open[b] - (1 - x[(v, b)]) * 1e6
+#             model += start_time[v] + handling_time[v] <= berth_close[b] + (1 - x[(v, b)]) * 1e6
+
+#     model.solve(pulp.PULP_CBC_CMD(msg=0))
+
+#     # -----------------------------
+#     # Output Results
+#     # -----------------------------
+#     st.success(f"Optimization completed! Status: {pulp.LpStatus[model.status]}")
+
+#     results = []
+#     for v in vessels:
+#         for b in berths:
+#             if pulp.value(x[(v, b)]) > 0.5:
+#                 results.append({
+#                     "Vessel": v,
+#                     "Berth": b,
+#                     "Start": pulp.value(start_time[v]),
+#                     "Finish": pulp.value(start_time[v]) + handling_time[v],
+#                     "Type": vessel_type[v]
+#                 })
+
+#     df_result = pd.DataFrame(results)
+#     st.subheader("📊 Allocation Results")
+#     st.dataframe(df_result)
+
+#     # -----------------------------
+#     # Cartesian Visualization
+#     # -----------------------------
+#     st.subheader("🧭 Berth Layout Simulation (Cartesian View)")
+
+#     fig, ax = plt.subplots(figsize=(10, 4))
+
+#     # Plot berths
+#     for b, (x_coord, y_coord) in berth_coord.items():
+#         ax.plot(x_coord, y_coord, "s", markersize=12, label=f"{b}")
+#         ax.text(x_coord, y_coord - 0.5, b, ha='center', va='top', fontsize=9, color='blue')
+
+#     colors = {"Container": "orange", "Bulk": "green", "Tanker": "red"}
+
+#     # Plot vessels near their assigned berth
+#     for _, row in df_result.iterrows():
+#         bx, by = berth_coord[row["Berth"]]
+#         ax.plot(bx, by + 1, "o", color=colors[row["Type"]])
+#         ax.text(bx, by + 1.2, f"{row['Vessel']} ({row['Start']:.1f}-{row['Finish']:.1f})",
+#                 ha='center', fontsize=8, color=colors[row["Type"]])
+
+#     ax.set_xlabel("X (Berth position)")
+#     ax.set_ylabel("Y (Dock line)")
+#     ax.set_title("Vessel Assignments on Cartesian Coordinate System")
+#     ax.grid(True)
+#     st.pyplot(fig)
+
