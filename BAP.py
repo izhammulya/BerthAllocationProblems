@@ -20,13 +20,12 @@ def milp_berth_allocation(vessels, berth_length):
         # Decision variables
         start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length - v["length"]) for v in vessels}
         
-        # Objective: minimize total starting position (encourage early allocation)
+        # Objective: minimize total starting position
         model += lpSum(start[v["name"]] for v in vessels)
 
         # Constraints
         for i, vi in enumerate(vessels):
             li = vi["length"]
-            # Berth capacity constraint
             model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
 
         # Non-overlapping constraints
@@ -69,286 +68,343 @@ def milp_berth_allocation(vessels, berth_length):
 # -----------------------------
 def genetic_algorithm_berth(vessels, berth_length, pop_size=50, generations=100):
     """Standard Genetic Algorithm"""
-    n_vessels = len(vessels)
-    vessel_lengths = [v["length"] for v in vessels]
-    eta_hours = [v["eta_hour"] for v in vessels]
-    conversion_factor = 50
-    
-    def create_individual():
-        # Random order and positions
-        order = random.sample(range(n_vessels), n_vessels)
-        positions = []
-        current_pos = 0
+    try:
+        n_vessels = len(vessels)
+        vessel_lengths = [v["length"] for v in vessels]
+        eta_hours = [v["eta_hour"] for v in vessels]
+        conversion_factor = 50
         
-        for idx in order:
-            max_pos = berth_length - vessel_lengths[idx]
-            pos = random.uniform(0, max(0.1, max_pos - current_pos)) + current_pos
-            positions.append(pos)
-            current_pos = pos + vessel_lengths[idx] + random.uniform(1, 5)
-        
-        return order, positions
-    
-    def fitness(individual):
-        order, positions = individual
-        total_delay = 0
-        
-        # Check constraints
-        for i in range(n_vessels):
-            vessel_idx = order[i]
-            pos = positions[i]
-            length = vessel_lengths[vessel_idx]
+        def create_individual():
+            # Create random order
+            order = list(range(n_vessels))
+            random.shuffle(order)
             
-            # Berth capacity
-            if pos + length > berth_length:
-                return float('inf')
+            # Assign positions sequentially
+            positions = []
+            current_pos = 0
             
-            # Check overlaps
-            for j in range(i + 1, n_vessels):
-                other_idx = order[j]
-                other_pos = positions[j]
-                other_length = vessel_lengths[other_idx]
+            for idx in order:
+                max_pos = berth_length - vessel_lengths[idx]
+                # Ensure we don't exceed berth length
+                if current_pos > max_pos:
+                    current_pos = max_pos
                 
-                if (pos < other_pos + other_length and pos + length > other_pos):
+                pos = current_pos + random.uniform(0, 10)  # Small random offset
+                pos = min(pos, max_pos)
+                positions.append(pos)
+                current_pos = pos + vessel_lengths[idx] + 2  # Small gap
+            
+            return order, positions
+        
+        def fitness(individual):
+            order, positions = individual
+            total_delay = 0
+            
+            # Check constraints
+            for i in range(n_vessels):
+                vessel_idx = order[i]
+                pos = positions[i]
+                length = vessel_lengths[vessel_idx]
+                
+                # Berth capacity
+                if pos + length > berth_length:
                     return float('inf')
+                
+                # Check overlaps
+                for j in range(i + 1, n_vessels):
+                    other_idx = order[j]
+                    other_pos = positions[j]
+                    other_length = vessel_lengths[other_idx]
+                    
+                    # Check if vessels overlap
+                    overlap = (pos < other_pos + other_length) and (pos + length > other_pos)
+                    if overlap:
+                        return float('inf')
+                
+                # Calculate delay
+                start_time = pos / conversion_factor
+                delay = max(0, start_time - eta_hours[vessel_idx])
+                total_delay += delay
             
-            # Calculate delay
-            start_time = pos / conversion_factor
-            delay = max(0, start_time - eta_hours[vessel_idx])
-            total_delay += delay
+            return total_delay
         
-        return total_delay
-    
-    def crossover(parent1, parent2):
-        order1, positions1 = parent1
-        order2, positions2 = parent2
-        
-        # Order crossover
-        crossover_point = random.randint(1, n_vessels - 1)
-        child_order = order1[:crossover_point]
-        
-        # Add missing vessels
-        for vessel in order2:
-            if vessel not in child_order:
-                child_order.append(vessel)
-        
-        # Position crossover (blend)
-        child_positions = []
-        for i in range(n_vessels):
-            alpha = random.random()
-            pos = alpha * positions1[i] + (1 - alpha) * positions2[i]
-            child_positions.append(pos)
-        
-        return child_order, child_positions
-    
-    def mutate(individual, mutation_rate=0.1):
-        order, positions = individual
-        
-        if random.random() < mutation_rate:
-            # Swap mutation
-            i, j = random.sample(range(n_vessels), 2)
-            order[i], order[j] = order[j], order[i]
-        
-        if random.random() < mutation_rate:
-            # Position mutation
-            idx = random.randint(0, n_vessels - 1)
-            max_pos = berth_length - vessel_lengths[order[idx]]
-            positions[idx] = random.uniform(0, max_pos)
-        
-        return order, positions
-    
-    # GA main loop
-    population = [create_individual() for _ in range(pop_size)]
-    best_fitness = float('inf')
-    best_individual = None
-    
-    for generation in range(generations):
-        # Evaluate fitness
-        fitness_scores = [fitness(ind) for ind in population]
-        
-        # Update best
-        current_best = min(fitness_scores)
-        if current_best < best_fitness:
-            best_fitness = current_best
-            best_individual = population[fitness_scores.index(current_best)]
-        
-        # Selection (tournament)
-        new_population = []
-        for _ in range(pop_size):
-            tournament = random.sample(list(zip(population, fitness_scores)), 3)
-            winner = min(tournament, key=lambda x: x[1])[0]
-            new_population.append(winner)
-        
-        # Crossover and mutation
-        population = []
-        for i in range(0, pop_size, 2):
-            if i + 1 < len(new_population):
-                parent1 = new_population[i]
-                parent2 = new_population[i + 1]
-                
-                child1 = crossover(parent1, parent2)
-                child2 = crossover(parent2, parent1)
-                
-                child1 = mutate(child1)
-                child2 = mutate(child2)
-                
-                population.extend([child1, child2])
-    
-    # Convert result
-    if best_individual and best_fitness != float('inf'):
-        order, positions = best_individual
-        allocations = []
-        
-        for i in range(n_vessels):
-            vessel_idx = order[i]
-            start_pos = positions[i]
-            start_time = start_pos / conversion_factor
-            delay = max(0, start_time - eta_hours[vessel_idx])
+        def crossover(parent1, parent2):
+            order1, positions1 = parent1
+            order2, positions2 = parent2
             
-            allocations.append({
-                "name": vessels[vessel_idx]["name"],
-                "type": vessels[vessel_idx]["type"],
-                "length": vessels[vessel_idx]["length"],
-                "eta": vessels[vessel_idx]["eta"],
-                "etd": vessels[vessel_idx]["etd"],
-                "eta_hour": vessels[vessel_idx]["eta_hour"],
-                "start": start_pos,
-                "end": start_pos + vessels[vessel_idx]["length"],
-                "delay": delay
-            })
+            # Order crossover (OX)
+            crossover_point = random.randint(1, n_vessels - 1)
+            child_order = order1[:crossover_point]
+            
+            # Add missing vessels from parent2
+            for vessel in order2:
+                if vessel not in child_order:
+                    child_order.append(vessel)
+            
+            # Blend positions
+            child_positions = []
+            for i in range(n_vessels):
+                alpha = random.random()
+                pos = alpha * positions1[i] + (1 - alpha) * positions2[i]
+                child_positions.append(pos)
+            
+            return child_order, child_positions
         
-        return allocations
-    return []
+        def mutate(individual, mutation_rate=0.1):
+            order, positions = individual
+            
+            if random.random() < mutation_rate:
+                # Swap two vessels
+                i, j = random.sample(range(n_vessels), 2)
+                order[i], order[j] = order[j], order[i]
+            
+            if random.random() < mutation_rate:
+                # Mutate a position
+                idx = random.randint(0, n_vessels - 1)
+                max_pos = berth_length - vessel_lengths[order[idx]]
+                positions[idx] = random.uniform(0, max_pos)
+            
+            return order, positions
+        
+        # Initialize population
+        population = [create_individual() for _ in range(pop_size)]
+        best_fitness = float('inf')
+        best_individual = None
+        
+        # Evolution loop
+        for generation in range(generations):
+            # Evaluate fitness
+            fitness_scores = []
+            for ind in population:
+                score = fitness(ind)
+                fitness_scores.append(score)
+                if score < best_fitness:
+                    best_fitness = score
+                    best_individual = ind
+            
+            # Selection (tournament)
+            new_population = []
+            for _ in range(pop_size):
+                # Tournament selection with size 3
+                tournament_indices = random.sample(range(len(population)), 3)
+                tournament_scores = [fitness_scores[i] for i in tournament_indices]
+                best_idx = tournament_indices[np.argmin(tournament_scores)]
+                new_population.append(population[best_idx])
+            
+            # Crossover and mutation
+            population = []
+            for i in range(0, len(new_population), 2):
+                if i + 1 < len(new_population):
+                    parent1 = new_population[i]
+                    parent2 = new_population[i + 1]
+                    
+                    child1 = crossover(parent1, parent2)
+                    child2 = crossover(parent2, parent1)
+                    
+                    child1 = mutate(child1)
+                    child2 = mutate(child2)
+                    
+                    population.extend([child1, child2])
+                else:
+                    population.append(new_population[i])
+        
+        # Convert best solution
+        if best_individual and best_fitness < float('inf'):
+            order, positions = best_individual
+            allocations = []
+            
+            for i in range(n_vessels):
+                vessel_idx = order[i]
+                start_pos = positions[i]
+                start_time = start_pos / conversion_factor
+                delay = max(0, start_time - eta_hours[vessel_idx])
+                
+                allocations.append({
+                    "name": vessels[vessel_idx]["name"],
+                    "type": vessels[vessel_idx]["type"],
+                    "length": vessels[vessel_idx]["length"],
+                    "eta": vessels[vessel_idx]["eta"],
+                    "etd": vessels[vessel_idx]["etd"],
+                    "eta_hour": vessels[vessel_idx]["eta_hour"],
+                    "start": start_pos,
+                    "end": start_pos + vessels[vessel_idx]["length"],
+                    "delay": delay
+                })
+            
+            return allocations
+        
+        return []
+    
+    except Exception as e:
+        st.error(f"GA Error: {str(e)}")
+        return []
 
 # -----------------------------
 # 3. SIMULATED ANNEALING
 # -----------------------------
 def simulated_annealing_berth(vessels, berth_length, initial_temp=1000, cooling_rate=0.95, iterations=500):
     """Simulated Annealing Algorithm"""
-    n_vessels = len(vessels)
-    vessel_lengths = [v["length"] for v in vessels]
-    eta_hours = [v["eta_hour"] for v in vessels]
-    conversion_factor = 50
-    
-    def create_solution():
-        order = list(range(n_vessels))
-        random.shuffle(order)
-        positions = [random.uniform(0, berth_length - vessel_lengths[i]) for i in range(n_vessels)]
-        return order, positions
-    
-    def calculate_cost(order, positions):
-        total_delay = 0
-        
-        # Check constraints
-        for i in range(n_vessels):
-            if positions[i] + vessel_lengths[order[i]] > berth_length:
-                return float('inf')
-        
-        # Check overlaps
-        for i in range(n_vessels):
-            for j in range(i + 1, n_vessels):
-                pos1, len1 = positions[i], vessel_lengths[order[i]]
-                pos2, len2 = positions[j], vessel_lengths[order[j]]
-                
-                if (pos1 < pos2 + len2 and pos1 + len1 > pos2):
-                    return float('inf')
-        
-        # Calculate delays
-        for i in range(n_vessels):
-            start_time = positions[i] / conversion_factor
-            delay = max(0, start_time - eta_hours[order[i]])
-            total_delay += delay
-        
-        return total_delay
-    
-    def get_neighbor(current_order, current_positions):
-        new_order = current_order.copy()
-        new_positions = current_positions.copy()
-        
-        mutation_type = random.choice(['swap', 'position', 'shift'])
-        
-        if mutation_type == 'swap':
-            i, j = random.sample(range(n_vessels), 2)
-            new_order[i], new_order[j] = new_order[j], new_order[i]
-        elif mutation_type == 'position':
-            idx = random.randint(0, n_vessels - 1)
-            max_pos = berth_length - vessel_lengths[new_order[idx]]
-            new_positions[idx] = random.uniform(0, max_pos)
-        else:  # shift
-            idx = random.randint(0, n_vessels - 1)
-            shift = random.uniform(-20, 20)
-            new_positions[idx] = max(0, new_positions[idx] + shift)
-        
-        return new_order, new_positions
-    
-    # SA main loop
-    current_order, current_positions = create_solution()
-    current_cost = calculate_cost(current_order, current_positions)
-    best_order, best_positions = current_order.copy(), current_positions.copy()
-    best_cost = current_cost
-    
-    temperature = initial_temp
-    
-    for iteration in range(iterations):
-        new_order, new_positions = get_neighbor(current_order, current_positions)
-        new_cost = calculate_cost(new_order, new_positions)
-        
-        # Acceptance probability
-        if new_cost < current_cost or random.random() < np.exp((current_cost - new_cost) / max(temperature, 1e-10)):
-            current_order, current_positions = new_order, new_positions
-            current_cost = new_cost
-            
-            if new_cost < best_cost:
-                best_order, best_positions = new_order.copy(), new_positions.copy()
-                best_cost = new_cost
-        
-        temperature *= cooling_rate
-    
-    # Convert result
-    if best_cost != float('inf'):
-        allocations = []
-        for i in range(n_vessels):
-            vessel_idx = best_order[i]
-            start_pos = best_positions[i]
-            start_time = start_pos / conversion_factor
-            delay = max(0, start_time - eta_hours[vessel_idx])
-            
-            allocations.append({
-                "name": vessels[vessel_idx]["name"],
-                "type": vessels[vessel_idx]["type"],
-                "length": vessels[vessel_idx]["length"],
-                "eta": vessels[vessel_idx]["eta"],
-                "etd": vessels[vessel_idx]["etd"],
-                "eta_hour": vessels[vessel_idx]["eta_hour"],
-                "start": start_pos,
-                "end": start_pos + vessels[vessel_idx]["length"],
-                "delay": delay
-            })
-        return allocations
-    return []
-
-# -----------------------------
-# 4. ML-ENHANCED GENETIC ALGORITHM
-# -----------------------------
-class MLEnhancedGA:
-    def __init__(self):
-        self.history = []
-    
-    def ml_enhanced_ga(self, vessels, berth_length, pop_size=50, generations=100):
-        """Genetic Algorithm enhanced with ML-based initialization and guidance"""
+    try:
         n_vessels = len(vessels)
         vessel_lengths = [v["length"] for v in vessels]
         eta_hours = [v["eta_hour"] for v in vessels]
         conversion_factor = 50
         
-        # ML-based priority calculation
-        priority_scores = self._calculate_ml_priorities(vessels)
-        
-        def create_ml_guided_individual():
-            # Use ML priorities to create better initial solutions
+        def create_solution():
+            # Create random order
             order = list(range(n_vessels))
+            random.shuffle(order)
             
-            # Sort by ML priority with some randomness
-            order.sort(key=lambda x: priority_scores[x] + random.uniform(-0.1, 0.1), reverse=True)
+            # Assign sequential positions
+            positions = []
+            current_pos = 0
+            for idx in order:
+                max_pos = berth_length - vessel_lengths[idx]
+                pos = current_pos + random.uniform(0, 10)
+                pos = min(pos, max_pos)
+                positions.append(pos)
+                current_pos = pos + vessel_lengths[idx] + 2
+            
+            return order, positions
+        
+        def calculate_cost(order, positions):
+            total_delay = 0
+            
+            # Check berth capacity
+            for i in range(n_vessels):
+                if positions[i] + vessel_lengths[order[i]] > berth_length:
+                    return float('inf')
+            
+            # Check overlaps
+            for i in range(n_vessels):
+                for j in range(i + 1, n_vessels):
+                    pos1, len1 = positions[i], vessel_lengths[order[i]]
+                    pos2, len2 = positions[j], vessel_lengths[order[j]]
+                    
+                    if (pos1 < pos2 + len2) and (pos1 + len1 > pos2):
+                        return float('inf')
+            
+            # Calculate delays
+            for i in range(n_vessels):
+                start_time = positions[i] / conversion_factor
+                delay = max(0, start_time - eta_hours[order[i]])
+                total_delay += delay
+            
+            return total_delay
+        
+        def get_neighbor(current_order, current_positions):
+            new_order = current_order.copy()
+            new_positions = current_positions.copy()
+            
+            # Choose random mutation
+            mutation_type = random.choice(['swap', 'position'])
+            
+            if mutation_type == 'swap':
+                i, j = random.sample(range(n_vessels), 2)
+                new_order[i], new_order[j] = new_order[j], new_order[i]
+            else:
+                idx = random.randint(0, n_vessels - 1)
+                max_pos = berth_length - vessel_lengths[new_order[idx]]
+                new_positions[idx] = random.uniform(0, max_pos)
+            
+            return new_order, new_positions
+        
+        # Initialize
+        current_order, current_positions = create_solution()
+        current_cost = calculate_cost(current_order, current_positions)
+        best_order, best_positions = current_order.copy(), current_positions.copy()
+        best_cost = current_cost
+        
+        temperature = initial_temp
+        
+        # Annealing process
+        for iteration in range(iterations):
+            new_order, new_positions = get_neighbor(current_order, current_positions)
+            new_cost = calculate_cost(new_order, new_positions)
+            
+            # Acceptance criterion
+            if new_cost < current_cost:
+                current_order, current_positions = new_order, new_positions
+                current_cost = new_cost
+                if new_cost < best_cost:
+                    best_order, best_positions = new_order.copy(), new_positions.copy()
+                    best_cost = new_cost
+            else:
+                # Accept worse solution with probability
+                acceptance_prob = np.exp((current_cost - new_cost) / temperature)
+                if random.random() < acceptance_prob:
+                    current_order, current_positions = new_order, new_positions
+                    current_cost = new_cost
+            
+            temperature *= cooling_rate
+        
+        # Convert result
+        if best_cost < float('inf'):
+            allocations = []
+            for i in range(n_vessels):
+                vessel_idx = best_order[i]
+                start_pos = best_positions[i]
+                start_time = start_pos / conversion_factor
+                delay = max(0, start_time - eta_hours[vessel_idx])
+                
+                allocations.append({
+                    "name": vessels[vessel_idx]["name"],
+                    "type": vessels[vessel_idx]["type"],
+                    "length": vessels[vessel_idx]["length"],
+                    "eta": vessels[vessel_idx]["eta"],
+                    "etd": vessels[vessel_idx]["etd"],
+                    "eta_hour": vessels[vessel_idx]["eta_hour"],
+                    "start": start_pos,
+                    "end": start_pos + vessels[vessel_idx]["length"],
+                    "delay": delay
+                })
+            return allocations
+        
+        return []
+    
+    except Exception as e:
+        st.error(f"SA Error: {str(e)}")
+        return []
+
+# -----------------------------
+# 4. ML-ENHANCED GENETIC ALGORITHM (SIMPLIFIED)
+# -----------------------------
+def ml_enhanced_ga_berth(vessels, berth_length, pop_size=50, generations=100):
+    """Genetic Algorithm with ML-inspired enhancements"""
+    try:
+        n_vessels = len(vessels)
+        vessel_lengths = [v["length"] for v in vessels]
+        eta_hours = [v["eta_hour"] for v in vessels]
+        conversion_factor = 50
+        
+        # ML-inspired: Calculate vessel priorities
+        def calculate_vessel_priorities():
+            priorities = []
+            for vessel in vessels:
+                score = 0.0
+                # Priority based on vessel type
+                type_weights = {"Container": 1.0, "Tanker": 0.9, "Bulk": 0.8, "RORO": 0.7, "Passenger": 0.6}
+                score += type_weights.get(vessel["type"], 0.5)
+                
+                # Priority based on ETA (earlier = higher priority)
+                score += (24 - vessel["eta_hour"]) / 24
+                
+                # Priority based on length (smaller = more flexible)
+                score += (300 - vessel["length"]) / 300
+                
+                priorities.append(score)
+            
+            # Normalize priorities
+            max_priority = max(priorities) if priorities else 1
+            return [p / max_priority for p in priorities]
+        
+        priorities = calculate_vessel_priorities()
+        
+        def create_ml_individual():
+            # Create order biased by ML priorities
+            order = list(range(n_vessels))
+            # Sort by priority with some randomness
+            order.sort(key=lambda x: priorities[x] + random.uniform(-0.2, 0.2), reverse=True)
             
             positions = []
             current_pos = 0
@@ -356,9 +412,10 @@ class MLEnhancedGA:
             for idx in order:
                 max_pos = berth_length - vessel_lengths[idx]
                 
-                # ML-guided positioning: high-priority vessels get better positions
-                ml_bias = priority_scores[idx] * 30
-                base_pos = max(current_pos, eta_hours[idx] * 50 + ml_bias)
+                # ML-guided: high priority vessels get positions closer to their ideal
+                ideal_pos = eta_hours[idx] * 50
+                ml_bias = priorities[idx] * 20
+                base_pos = max(current_pos, ideal_pos - ml_bias)
                 
                 pos = min(base_pos + random.uniform(-10, 10), max_pos)
                 positions.append(max(0, pos))
@@ -366,7 +423,7 @@ class MLEnhancedGA:
             
             return order, positions
         
-        # Use standard GA functions but with ML-guided initialization
+        # Use standard GA functions but with ML initialization
         def fitness(individual):
             order, positions = individual
             total_delay = 0
@@ -385,18 +442,18 @@ class MLEnhancedGA:
                     other_pos = positions[j]
                     other_length = vessel_lengths[other_idx]
                     
-                    if (pos < other_pos + other_length and pos + length > other_pos):
+                    if (pos < other_pos + other_length) and (pos + length > other_pos):
                         return float('inf')
                 
                 # Calculate delay with ML weighting
                 start_time = pos / conversion_factor
                 delay = max(0, start_time - eta_hours[vessel_idx])
-                ml_weight = 1.0 + priority_scores[vessel_idx] * 0.5  # Higher weight for important vessels
-                total_delay += delay * ml_weight
+                # Higher priority vessels get more weight
+                weighted_delay = delay * (1 + priorities[vessel_idx] * 0.3)
+                total_delay += weighted_delay
             
             return total_delay
         
-        # Crossover and mutation functions (same as standard GA)
         def crossover(parent1, parent2):
             order1, positions1 = parent1
             order2, positions2 = parent2
@@ -426,15 +483,18 @@ class MLEnhancedGA:
             if random.random() < mutation_rate:
                 idx = random.randint(0, n_vessels - 1)
                 max_pos = berth_length - vessel_lengths[order[idx]]
-                # ML-guided mutation: bias towards good positions
-                ideal_pos = eta_hours[order[idx]] * 50
-                new_pos = ideal_pos + random.uniform(-20, 20)
+                # ML-guided mutation
+                if random.random() < 0.7:  # 70% chance of ML-guided mutation
+                    ideal_pos = eta_hours[order[idx]] * 50
+                    new_pos = ideal_pos + random.uniform(-30, 30)
+                else:
+                    new_pos = random.uniform(0, max_pos)
                 positions[idx] = max(0, min(new_pos, max_pos))
             
             return order, positions
         
-        # ML-enhanced GA main loop
-        population = [create_ml_guided_individual() for _ in range(pop_size)]
+        # GA main loop with ML initialization
+        population = [create_ml_individual() for _ in range(pop_size)]
         best_fitness = float('inf')
         best_individual = None
         
@@ -449,13 +509,14 @@ class MLEnhancedGA:
             # Tournament selection
             new_population = []
             for _ in range(pop_size):
-                tournament = random.sample(list(zip(population, fitness_scores)), 3)
-                winner = min(tournament, key=lambda x: x[1])[0]
-                new_population.append(winner)
+                tournament_indices = random.sample(range(len(population)), 3)
+                tournament_scores = [fitness_scores[i] for i in tournament_indices]
+                best_idx = tournament_indices[np.argmin(tournament_scores)]
+                new_population.append(population[best_idx])
             
             # Crossover and mutation
             population = []
-            for i in range(0, pop_size, 2):
+            for i in range(0, len(new_population), 2):
                 if i + 1 < len(new_population):
                     parent1 = new_population[i]
                     parent2 = new_population[i + 1]
@@ -467,12 +528,11 @@ class MLEnhancedGA:
                     child2 = mutate(child2)
                     
                     population.extend([child1, child2])
+                else:
+                    population.append(new_population[i])
         
-        # Store successful solution in history
-        if best_individual and best_fitness != float('inf'):
-            self._update_ml_history(vessels, best_individual, best_fitness)
-            
-            # Convert to allocation format
+        # Convert result
+        if best_individual and best_fitness < float('inf'):
             order, positions = best_individual
             allocations = []
             
@@ -495,204 +555,106 @@ class MLEnhancedGA:
                 })
             
             return allocations
+        
         return []
     
-    def _calculate_ml_priorities(self, vessels):
-        """Calculate vessel priorities based on learned patterns"""
-        priorities = []
-        
-        for vessel in vessels:
-            # Simple ML-like heuristic based on vessel characteristics
-            base_priority = 0.0
-            
-            # Priority factors
-            if vessel['type'] == 'Container':
-                base_priority += 0.3  # Containers often have higher priority
-            elif vessel['type'] == 'Tanker':
-                base_priority += 0.2
-            
-            # Smaller vessels might be more flexible
-            if vessel['length'] < 150:
-                base_priority += 0.1
-            
-            # Earlier ETA gets higher priority
-            base_priority += (24 - vessel['eta_hour']) / 48
-            
-            # Learn from history if available
-            if self.history:
-                historical_priority = self._get_historical_priority(vessel)
-                base_priority = 0.7 * base_priority + 0.3 * historical_priority
-            
-            priorities.append(base_priority)
-        
-        return priorities
-    
-    def _get_historical_priority(self, vessel):
-        """Get priority based on historical successful allocations"""
-        if not self.history:
-            return 0.5
-        
-        # Simple average of historical delays for similar vessels
-        similar_delays = []
-        for hist_vessel, delay in self.history:
-            if (hist_vessel['type'] == vessel['type'] and 
-                abs(hist_vessel['length'] - vessel['length']) < 50):
-                similar_delays.append(delay)
-        
-        if similar_delays:
-            avg_delay = np.mean(similar_delays)
-            # Convert delay to priority (lower delay = higher priority)
-            return max(0.1, 1.0 - (avg_delay / 10))
-        
-        return 0.5
-    
-    def _update_ml_history(self, vessels, solution, fitness):
-        """Update ML history with successful solutions"""
-        order, positions = solution
-        conversion_factor = 50
-        
-        for i in range(len(vessels)):
-            vessel_idx = order[i]
-            start_time = positions[i] / conversion_factor
-            delay = max(0, start_time - vessels[vessel_idx]["eta_hour"])
-            
-            self.history.append((vessels[vessel_idx], delay))
-        
-        # Keep only recent history
-        if len(self.history) > 100:
-            self.history = self.history[-50:]
+    except Exception as e:
+        st.error(f"ML-GA Error: {str(e)}")
+        return []
 
 # -----------------------------
-# 5. REINFORCEMENT LEARNING (Simplified)
+# 5. HEURISTIC ALGORITHM (Instead of RL for stability)
 # -----------------------------
-def reinforcement_learning_berth(vessels, berth_length, episodes=50):
-    """Simplified Reinforcement Learning approach"""
-    n_vessels = len(vessels)
-    conversion_factor = 50
-    
-    # Simplified RL: Q-learning with state-action pairs
-    def calculate_state(vessel_index, allocated_vessels):
-        """Calculate state representation"""
-        if vessel_index >= n_vessels:
-            return "terminal"
+def heuristic_berth_allocation(vessels, berth_length):
+    """Heuristic algorithm based on ETA and vessel characteristics"""
+    try:
+        # Sort vessels by ETA (earliest first)
+        sorted_vessels = sorted(vessels, key=lambda x: x["eta_hour"])
         
-        vessel = vessels[vessel_index]
-        state_features = [
-            vessel['length'] / 300,
-            vessel['eta_hour'] / 24,
-            len(allocated_vessels) / n_vessels,
-            sum(v['length'] for v in allocated_vessels) / berth_length
-        ]
-        return tuple(round(f, 2) for f in state_features)
-    
-    def get_valid_actions(allocated_vessels):
-        """Get possible positions for next vessel"""
-        if not allocated_vessels:
-            return [0]  # Start from beginning
-        
-        # Simple: try positions after each existing vessel
-        candidate_positions = []
-        for alloc in allocated_vessels:
-            candidate_positions.append(alloc['end'] + 1)
-        
-        # Also try beginning
-        candidate_positions.append(0)
-        
-        return [max(0, min(pos, berth_length - 50)) for pos in candidate_positions]
-    
-    # Simplified Q-learning
-    Q_table = {}
-    learning_rate = 0.1
-    discount_factor = 0.9
-    exploration_rate = 0.3
-    
-    best_allocations = []
-    best_total_delay = float('inf')
-    
-    for episode in range(episodes):
-        allocated_vessels = []
-        current_vessel = 0
-        total_delay = 0
-        
-        while current_vessel < n_vessels:
-            state = calculate_state(current_vessel, allocated_vessels)
-            valid_actions = get_valid_actions(allocated_vessels)
-            
-            # Choose action
-            if random.random() < exploration_rate or state not in Q_table:
-                action = random.choice(valid_actions)
-            else:
-                # Choose best action from Q-table
-                action = max(valid_actions, key=lambda a: Q_table.get((state, a), 0))
-            
-            # Execute action
-            vessel = vessels[current_vessel]
-            start_pos = action
-            end_pos = start_pos + vessel['length']
-            
-            # Check if valid
-            valid = True
-            if end_pos > berth_length:
-                valid = False
-            else:
-                for alloc in allocated_vessels:
-                    if (start_pos < alloc['end'] and end_pos > alloc['start']):
-                        valid = False
-                        break
-            
-            if valid:
-                # Calculate reward (negative delay)
-                start_time = start_pos / conversion_factor
-                delay = max(0, start_time - vessel['eta_hour'])
-                reward = -delay
-                
-                allocated_vessels.append({
-                    'vessel': vessel,
-                    'start': start_pos,
-                    'end': end_pos,
-                    'delay': delay
-                })
-                total_delay += delay
-                current_vessel += 1
-            else:
-                reward = -10  # Penalty for invalid action
-            
-            # Update Q-table (simplified)
-            next_state = calculate_state(current_vessel, allocated_vessels)
-            if state != "terminal":
-                if (state, action) not in Q_table:
-                    Q_table[(state, action)] = 0
-                
-                max_next_q = max([Q_table.get((next_state, a), 0) for a in get_valid_actions(allocated_vessels)]) if next_state != "terminal" else 0
-                Q_table[(state, action)] = (1 - learning_rate) * Q_table[(state, action)] + learning_rate * (reward + discount_factor * max_next_q)
-        
-        # Update best solution
-        if total_delay < best_total_delay and len(allocated_vessels) == n_vessels:
-            best_total_delay = total_delay
-            best_allocations = allocated_vessels.copy()
-    
-    # Convert to standard format
-    if best_allocations:
         allocations = []
-        for alloc in best_allocations:
-            allocations.append({
-                "name": alloc['vessel']["name"],
-                "type": alloc['vessel']["type"],
-                "length": alloc['vessel']["length"],
-                "eta": alloc['vessel']["eta"],
-                "etd": alloc['vessel']["etd"],
-                "eta_hour": alloc['vessel']["eta_hour"],
-                "start": alloc['start'],
-                "end": alloc['end'],
-                "delay": alloc['delay']
-            })
+        used_positions = []  # Track (start, end) positions
+        
+        for vessel in sorted_vessels:
+            ideal_position = vessel["eta_hour"] * 50
+            vessel_length = vessel["length"]
+            
+            # Find earliest available position
+            position_found = False
+            candidate_position = 0
+            
+            while not position_found and candidate_position <= berth_length - vessel_length:
+                # Check if this position overlaps with any existing vessel
+                overlaps = False
+                for used_start, used_end in used_positions:
+                    if (candidate_position < used_end and candidate_position + vessel_length > used_start):
+                        overlaps = True
+                        break
+                
+                if not overlaps:
+                    # Position is available
+                    start_pos = candidate_position
+                    end_pos = start_pos + vessel_length
+                    
+                    # Calculate delay
+                    start_time = start_pos / 50
+                    delay = max(0, start_time - vessel["eta_hour"])
+                    
+                    allocations.append({
+                        "name": vessel["name"],
+                        "type": vessel["type"],
+                        "length": vessel["length"],
+                        "eta": vessel["eta"],
+                        "etd": vessel["etd"],
+                        "eta_hour": vessel["eta_hour"],
+                        "start": start_pos,
+                        "end": end_pos,
+                        "delay": delay
+                    })
+                    
+                    used_positions.append((start_pos, end_pos))
+                    position_found = True
+                else:
+                    # Try next position (with some gap)
+                    candidate_position += 5
+            
+            if not position_found:
+                # If no position found, try to place at the end
+                if used_positions:
+                    last_position = max(used_positions, key=lambda x: x[1])[1]
+                    start_pos = last_position + 1
+                else:
+                    start_pos = 0
+                
+                if start_pos + vessel_length <= berth_length:
+                    end_pos = start_pos + vessel_length
+                    start_time = start_pos / 50
+                    delay = max(0, start_time - vessel["eta_hour"])
+                    
+                    allocations.append({
+                        "name": vessel["name"],
+                        "type": vessel["type"],
+                        "length": vessel["length"],
+                        "eta": vessel["eta"],
+                        "etd": vessel["etd"],
+                        "eta_hour": vessel["eta_hour"],
+                        "start": start_pos,
+                        "end": end_pos,
+                        "delay": delay
+                    })
+                    
+                    used_positions.append((start_pos, end_pos))
+        
         return allocations
-    return []
+    
+    except Exception as e:
+        st.error(f"Heuristic Error: {str(e)}")
+        return []
 
 # -----------------------------
 # HELPER FUNCTIONS
 # -----------------------------
 def generate_random_vessels(num_vessels):
+    """Generate random vessel data"""
     vessel_types = ["Container", "Bulk", "Tanker", "RORO", "Passenger"]
     vessels = []
     
@@ -715,18 +677,19 @@ def generate_random_vessels(num_vessels):
     return vessels
 
 def plot_berth_allocation(allocations, berth_length, algorithm_name):
+    """Visualize berth allocation"""
     if not allocations:
         st.warning("No allocation data to visualize")
         return
         
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(12, 6))
     ax.set_xlim(0, berth_length)
     ax.set_ylim(0, len(allocations) * 3 + 5)
-    ax.set_title(f"Berth Allocation - {algorithm_name}", fontsize=16)
+    ax.set_title(f"Berth Allocation - {algorithm_name}", fontsize=14)
     ax.set_xlabel("Berth Position (meters)")
     ax.set_ylabel("Vessel Position")
     
-    # Draw berth line and grid
+    # Draw berth line
     ax.hlines(1, 0, berth_length, colors='blue', linewidth=4, label='Berth Line')
     ax.grid(True, alpha=0.3)
     
@@ -738,26 +701,24 @@ def plot_berth_allocation(allocations, berth_length, algorithm_name):
     # Plot vessels
     for idx, alloc in enumerate(allocations):
         start, end = alloc['start'], alloc['end']
-        y_pos = 5 + idx * 3
+        y_pos = 5 + idx * 2.5
         color = vessel_colors.get(alloc['type'], "#118AB2")
         
         rect = plt.Rectangle((start, y_pos - 0.5), end-start, 1.0,
-                           color=color, alpha=0.8, edgecolor='black', linewidth=1.5)
+                           color=color, alpha=0.8, edgecolor='black', linewidth=1)
         ax.add_patch(rect)
         
         mid_x = (start + end) / 2
-        ax.text(mid_x, y_pos + 0.8, f"{alloc['name']}\n({alloc['type']})", 
-                ha='center', va='bottom', fontsize=9, weight='bold')
+        ax.text(mid_x, y_pos + 0.6, f"{alloc['name']}", 
+                ha='center', va='bottom', fontsize=8, weight='bold')
         
         delay_text = f"Delay: {alloc['delay']:.1f}h" if alloc['delay'] > 0.1 else "On time"
         delay_color = 'red' if alloc['delay'] > 0.1 else 'green'
-        ax.text(mid_x, y_pos - 1.0, 
-                f"Pos: {start:.0f}-{end:.0f}m | {delay_text}", 
-                ha='center', va='top', fontsize=8, color=delay_color)
+        ax.text(mid_x, y_pos - 0.8, f"{delay_text}", 
+                ha='center', va='top', fontsize=7, color=delay_color)
     
-    ax.text(berth_length/2, 0.3, f"TOTAL BERTH LENGTH: {berth_length}m", 
-            ha='center', va='bottom', fontsize=12, weight='bold', color='blue',
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
+    ax.text(berth_length/2, 0.3, f"Total Berth: {berth_length}m", 
+            ha='center', va='bottom', fontsize=10, weight='bold', color='blue')
     
     plt.tight_layout()
     st.pyplot(fig)
@@ -770,14 +731,10 @@ def main():
     st.title("🚢 Berth Allocation Optimization - 5 Algorithm Comparison")
     st.markdown("---")
     
-    # Initialize ML enhanced GA
-    if 'ml_enhanced_ga' not in st.session_state:
-        st.session_state.ml_enhanced_ga = MLEnhancedGA()
-    
     # Sidebar
     st.sidebar.header("⚙️ Simulation Settings")
-    num_vessels = st.sidebar.slider("Number of Vessels", 3, 10, 5)
-    berth_length = st.sidebar.slider("Total Berth Length (meters)", 500, 2000, 1000, 100)
+    num_vessels = st.sidebar.slider("Number of Vessels", 3, 8, 5)
+    berth_length = st.sidebar.slider("Total Berth Length (meters)", 500, 1500, 1000, 100)
     
     algorithm_choice = st.sidebar.radio(
         "Run Mode:",
@@ -788,17 +745,17 @@ def main():
         selected_algorithm = st.sidebar.selectbox(
             "Select Algorithm:",
             ["MILP (PuLP)", "Genetic Algorithm", "Simulated Annealing", 
-             "ML-Enhanced GA", "Reinforcement Learning"]
+             "ML-Enhanced GA", "Heuristic Algorithm"]
         )
     
     st.sidebar.markdown("---")
     st.sidebar.info("""
-    **Algorithm Types:**
-    - **MILP**: Exact mathematical optimization
+    **Algorithms:**
+    - **MILP**: Exact optimization
     - **GA**: Evolutionary search
     - **SA**: Probabilistic optimization  
-    - **ML-GA**: GA enhanced with machine learning
-    - **RL**: Reinforcement learning
+    - **ML-GA**: GA with ML guidance
+    - **Heuristic**: Rule-based approach
     """)
     
     # Main content
@@ -826,9 +783,9 @@ def main():
                 elif selected_algorithm == "Simulated Annealing":
                     allocations = simulated_annealing_berth(vessels, berth_length)
                 elif selected_algorithm == "ML-Enhanced GA":
-                    allocations = st.session_state.ml_enhanced_ga.ml_enhanced_ga(vessels, berth_length)
-                else:  # Reinforcement Learning
-                    allocations = reinforcement_learning_berth(vessels, berth_length)
+                    allocations = ml_enhanced_ga_berth(vessels, berth_length)
+                else:  # Heuristic Algorithm
+                    allocations = heuristic_berth_allocation(vessels, berth_length)
                 
                 computation_time = time.time() - start_time
                 
@@ -849,29 +806,32 @@ def compare_all_algorithms(vessels, berth_length):
         "MILP (PuLP)": milp_berth_allocation,
         "Genetic Algorithm": genetic_algorithm_berth,
         "Simulated Annealing": simulated_annealing_berth,
-        "ML-Enhanced GA": st.session_state.ml_enhanced_ga.ml_enhanced_ga,
-        "Reinforcement Learning": reinforcement_learning_berth
+        "ML-Enhanced GA": ml_enhanced_ga_berth,
+        "Heuristic Algorithm": heuristic_berth_allocation
     }
     
     for algo_name, algo_func in algorithms.items():
-        start_time = time.time()
-        allocations = algo_func(vessels, berth_length)
-        computation_time = time.time() - start_time
-        
-        if allocations:
-            total_delay = sum(a["delay"] for a in allocations)
-            utilization = (sum(a["length"] for a in allocations) / berth_length) * 100
-        else:
-            total_delay = float('inf')
-            utilization = 0
-        
-        results[algo_name] = {
-            "allocations": allocations,
-            "computation_time": computation_time,
-            "total_delay": total_delay,
-            "utilization": utilization,
-            "feasible": allocations is not None and len(allocations) > 0
-        }
+        with st.spinner(f"Running {algo_name}..."):
+            start_time = time.time()
+            allocations = algo_func(vessels, berth_length)
+            computation_time = time.time() - start_time
+            
+            if allocations and len(allocations) == len(vessels):
+                total_delay = sum(a["delay"] for a in allocations)
+                utilization = (sum(a["length"] for a in allocations) / berth_length) * 100
+                feasible = True
+            else:
+                total_delay = float('inf')
+                utilization = 0
+                feasible = False
+            
+            results[algo_name] = {
+                "allocations": allocations,
+                "computation_time": computation_time,
+                "total_delay": total_delay,
+                "utilization": utilization,
+                "feasible": feasible
+            }
     
     return results
 
@@ -941,12 +901,6 @@ def display_comparison_results(results, berth_length):
         # Show visualization for best algorithm
         st.subheader(f"📊 Best Allocation Visualization ({best_algo})")
         plot_berth_allocation(best_result["allocations"], berth_length, best_algo)
-    
-    # Show individual results in expanders
-    for algo_name, result in results.items():
-        if result['feasible']:
-            with st.expander(f"View {algo_name} Detailed Results"):
-                display_single_results(result["allocations"], berth_length, algo_name, result["computation_time"])
 
 if __name__ == "__main__":
     main()
@@ -1543,4 +1497,5 @@ if __name__ == "__main__":
 
 # if __name__ == "__main__":
 #     main()
+
 
