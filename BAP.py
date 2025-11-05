@@ -141,9 +141,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import random
 from pulp import LpProblem, LpVariable, LpMinimize, lpSum, LpStatus, value
+import datetime
 
 # -----------------------------
-# Optimization Model
+# Optimization Model - FIXED
 # -----------------------------
 def berth_allocation_optimization(vessels, berth_length):
     model = LpProblem("Berth_Allocation", LpMinimize)
@@ -151,15 +152,22 @@ def berth_allocation_optimization(vessels, berth_length):
     start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length) for v in vessels}
     delay = {v["name"]: LpVariable(f"delay_{v['name']}", lowBound=0) for v in vessels}
 
-    # Objective: minimize total delay
+    # Objective: minimize total delay (in hours)
     model += lpSum(delay[v["name"]] for v in vessels)
 
     for i, vi in enumerate(vessels):
         li = vi["length"]
-        eta_i = int(vi["eta"].split(":")[0])  # hour-based ETA
+        eta_i = vi["eta_hour"]  # Use the pre-calculated ETA hour
+        
+        # Constraint: vessel must fit within berth
         model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
-        model += delay[vi["name"]] >= start[vi["name"]] - eta_i * 10
+        
+        # FIXED: Delay constraint - convert position to time
+        # Assuming vessels move at constant speed to their assigned positions
+        # Delay = actual start time - ETA (in hours)
+        model += delay[vi["name"]] >= (start[vi["name"]] / 10) - eta_i
 
+        # Non-overlapping constraints
         for j, vj in enumerate(vessels):
             if i >= j:
                 continue
@@ -177,29 +185,30 @@ def berth_allocation_optimization(vessels, berth_length):
 
     allocations = []
     for v in vessels:
+        start_pos = value(start[v["name"]])
+        delay_hours = value(delay[v["name"]])
         allocations.append({
             "name": v["name"],
             "type": v["type"],
             "length": v["length"],
             "eta": v["eta"],
             "etd": v["etd"],
-            "start": value(start[v["name"]]),
-            "end": value(start[v["name"]]) + v["length"],
-            "delay": value(delay[v["name"]])
+            "eta_hour": v["eta_hour"],
+            "start": start_pos,
+            "end": start_pos + v["length"],
+            "delay": delay_hours  # Now in hours
         })
     return allocations
 
-
 # -----------------------------
-# Visualization
+# Visualization - UPDATED
 # -----------------------------
 def plot_berth_allocation(allocations, berth_length):
     fig, ax = plt.subplots(figsize=(14, 8))
     
-    # Set up the coordinate system
     ax.set_xlim(0, berth_length)
     ax.set_ylim(0, len(allocations) * 3 + 5)
-    ax.set_title("Optimized Berth Allocation - Cartesian Coordinate View", fontsize=16)
+    ax.set_title("Optimized Berth Allocation (Delay in Hours)", fontsize=16)
     ax.set_xlabel("Berth Position (m)")
     ax.set_ylabel("Vessel Position")
     
@@ -218,14 +227,13 @@ def plot_berth_allocation(allocations, berth_length):
         "Passenger": "brown"
     }
     
-    # Plot each vessel as a rectangle in cartesian coordinates
+    # Plot each vessel
     for idx, alloc in enumerate(allocations):
         start = alloc["start"]
         end = alloc["end"]
-        y_pos = 5 + idx * 3  # Position vessels vertically with spacing
+        y_pos = 5 + idx * 3
         ship_length = end - start
         
-        # Get color based on vessel type
         color = vessel_colors.get(alloc["type"], "blue")
         
         # Draw vessel as rectangle
@@ -233,22 +241,26 @@ def plot_berth_allocation(allocations, berth_length):
                              color=color, alpha=0.7, edgecolor='black', linewidth=1)
         ax.add_patch(rect)
         
-        # Add vessel information
+        # Add vessel information with delay in hours
         mid_x = (start + end) / 2
         ax.text(mid_x, y_pos + 0.7, f"🚢 {alloc['name']} ({alloc['type']})", 
                 ha='center', va='bottom', fontsize=9, weight='bold')
+        
+        # FIXED: Show delay in hours with proper units
+        delay_text = f"Delay: {alloc['delay']:.1f} hours" if alloc['delay'] > 0 else "On time"
+        delay_color = 'red' if alloc['delay'] > 0 else 'green'
+        
         ax.text(mid_x, y_pos - 1.0, 
-                f"Pos:{start:.1f}-{end:.1f}m | ETA:{alloc['eta']} | Delay:{alloc['delay']:.1f}", 
-                ha='center', va='top', fontsize=8, color='gray')
+                f"Pos:{start:.1f}-{end:.1f}m | ETA:{alloc['eta']} | {delay_text}", 
+                ha='center', va='top', fontsize=8, color=delay_color)
         
         # Draw connection line from vessel to berth
         ax.plot([mid_x, mid_x], [y_pos - 0.5, 1], 'k--', alpha=0.5, linewidth=0.8)
     
-    # Add berth length markers
     ax.text(berth_length/2, 0.5, f"Total Berth Length: {berth_length}m", 
             ha='center', va='bottom', fontsize=10, weight='bold', color='blue')
     
-    # Add legend for vessel types
+    # Add legend
     legend_elements = []
     for vtype, color in vessel_colors.items():
         legend_elements.append(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=0.7, label=vtype))
@@ -257,68 +269,7 @@ def plot_berth_allocation(allocations, berth_length):
     st.pyplot(fig)
 
 # -----------------------------
-# Enhanced Visualization with Timeline View
-# -----------------------------
-def plot_timeline_view(allocations, berth_length):
-    """Alternative view showing vessels along the berth with time dimension"""
-    fig, ax = plt.subplots(figsize=(14, 6))
-    
-    ax.set_xlim(0, berth_length)
-    ax.set_ylim(0, 10)
-    ax.set_title("Berth Allocation - Spatial Distribution", fontsize=16)
-    ax.set_xlabel("Berth Position (m)")
-    ax.set_ylabel("")
-    ax.set_yticks([])  # Remove y-axis ticks
-    
-    # Draw the berth as a horizontal line
-    ax.hlines(5, 0, berth_length, colors='navy', linewidth=6, label='Berth')
-    
-    # Draw position markers along the berth
-    for pos in range(0, berth_length + 1, 100):
-        if pos <= berth_length:
-            ax.vlines(pos, 4.8, 5.2, colors='gray', alpha=0.5, linewidth=0.5)
-            if pos % 200 == 0:  # Label every 200m
-                ax.text(pos, 4.5, f"{pos}m", ha='center', va='top', fontsize=8, color='gray')
-    
-    # Plot vessels along the berth line
-    vessel_colors = {
-        "Container": "red",
-        "Bulk": "green", 
-        "Tanker": "orange",
-        "RORO": "purple",
-        "Passenger": "brown"
-    }
-    
-    for idx, alloc in enumerate(allocations):
-        start = alloc["start"]
-        end = alloc["end"]
-        ship_length = end - start
-        
-        color = vessel_colors.get(alloc["type"], "blue")
-        
-        # Draw vessel above the berth line
-        y_pos = 6
-        rect = plt.Rectangle((start, y_pos), ship_length, 1.0,
-                           color=color, alpha=0.8, edgecolor='black', linewidth=1)
-        ax.add_patch(rect)
-        
-        # Add vessel label
-        mid_x = (start + end) / 2
-        ax.text(mid_x, y_pos + 1.3, f"{alloc['name']}\n({alloc['type']})", 
-                ha='center', va='bottom', fontsize=8, weight='bold')
-        ax.text(mid_x, y_pos - 0.3, f"Delay: {alloc['delay']:.1f}", 
-                ha='center', va='top', fontsize=7, color='darkred')
-    
-    # Add berth capacity information
-    ax.text(berth_length, 5.5, f"Berth Capacity: {berth_length}m", 
-            ha='right', va='bottom', fontsize=10, weight='bold', color='navy',
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
-    
-    st.pyplot(fig)
-
-
-# -----------------------------
-# Random Data Generator
+# Updated Random Data Generator
 # -----------------------------
 def generate_random_vessels(num_vessels):
     vessel_types = ["Container", "Bulk", "Tanker", "RORO", "Passenger"]
@@ -332,22 +283,29 @@ def generate_random_vessels(num_vessels):
             "name": f"Vessel_{i+1}",
             "type": vtype,
             "length": length,
-            "eta": f"{eta_hour}:00",
-            "etd": f"{etd_hour}:00"
+            "eta": f"{eta_hour:02d}:00",
+            "etd": f"{etd_hour:02d}:00",
+            "eta_hour": eta_hour  # Store ETA as numeric for calculations
         })
     return vessels
-
 
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.title("🚢 Berth Allocation Optimization with Cartesian Coordinates")
+st.title("🚢 Berth Allocation Optimization (Delay in Hours)")
 
 st.sidebar.header("Simulation Settings")
 num_vessels = st.sidebar.slider("Number of Vessels", 3, 15, 6)
 berth_length = st.sidebar.slider("Total Berth Length (m)", 200, 2000, 800, step=100)
 
-st.write("Click the button below to generate random vessel data and run optimization:")
+# Explanation
+st.info("""
+**📝 Explanation of Delay Calculation:**
+- **Delay is now in hours** (not distance)
+- Assumption: Vessels move at constant speed to assigned positions
+- Conversion: Position (meters) ÷ 10 = Time (hours)
+- Negative delays are clamped to 0 (vessels cannot start before ETA)
+""")
 
 if st.button("🎲 Generate & Optimize"):
     vessels = generate_random_vessels(num_vessels)
@@ -358,14 +316,22 @@ if st.button("🎲 Generate & Optimize"):
     if allocations:
         st.success("✅ Optimization completed successfully")
         st.subheader("Optimized Allocation Results")
-        st.dataframe(allocations)
         
-        # Show both visualization options
-        st.subheader("📊 Cartesian Coordinate View")
+        # Display results with proper delay units
+        display_df = []
+        for alloc in allocations:
+            display_df.append({
+                "Vessel": alloc["name"],
+                "Type": alloc["type"],
+                "Length (m)": alloc["length"],
+                "ETA": alloc["eta"],
+                "Start Position (m)": f"{alloc['start']:.1f}",
+                "End Position (m)": f"{alloc['end']:.1f}",
+                "Delay (hours)": f"{alloc['delay']:.2f}"
+            })
+        st.dataframe(display_df)
+        
         plot_berth_allocation(allocations, berth_length)
-        
-        st.subheader("📊 Berth Spatial Distribution")
-        plot_timeline_view(allocations, berth_length)
         
         # Show summary statistics
         st.subheader("📈 Allocation Summary")
@@ -376,13 +342,13 @@ if st.button("🎲 Generate & Optimize"):
             st.metric("Berth Utilization", f"{utilization:.1f}%")
         with col2:
             total_delay = sum(alloc["delay"] for alloc in allocations)
-            st.metric("Total Delay", f"{total_delay:.1f}")
+            st.metric("Total Delay", f"{total_delay:.1f} hours")
         with col3:
-            avg_delay = total_delay / len(allocations)
-            st.metric("Average Delay", f"{avg_delay:.1f}")
+            avg_delay = total_delay / len(allocations) if allocations else 0
+            st.metric("Average Delay", f"{avg_delay:.1f} hours")
             
     else:
         st.error("❌ No feasible allocation found. Try adjusting parameters.")
 
 st.markdown("---")
-st.caption("Developed for berth scheduling research | Cartesian coordinate visualization with berth line")
+st.caption("Delay is now calculated in hours instead of distance units")
