@@ -152,21 +152,30 @@ def berth_allocation_optimization(vessels, berth_length):
         # Decision variables
         start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length - v["length"]) for v in vessels}
         delay = {v["name"]: LpVariable(f"delay_{v['name']}", lowBound=0) for v in vessels}
+        
+        # NEW: Variable for time-based start position
+        start_time = {v["name"]: LpVariable(f"start_time_{v['name']}", lowBound=0) for v in vessels}
 
         # Objective: minimize total delay (in hours)
         model += lpSum(delay[v["name"]] for v in vessels)
+
+        # Conversion factor: meters to hours
+        conversion_factor = 50  # 50 meters = 1 hour
 
         # Constraints for each vessel
         for i, vi in enumerate(vessels):
             li = vi["length"]
             eta_i = vi["eta_hour"]
             
-            # Constraint: vessel must fit within berth (already handled in lowBound)
+            # Constraint: vessel must fit within berth
+            model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
             
-            # FIXED: Delay constraint - convert position to time units
-            # Assuming 50 meters = 1 hour for conversion
-            conversion_factor = 50  # meters per hour
-            model += delay[vi["name"]] >= (start[vi["name"]] / conversion_factor) - eta_i
+            # FIXED: Convert position to time using constraint
+            # start_time = start_position / conversion_factor
+            model += start_time[vi["name"]] == start[vi["name"]] / conversion_factor
+            
+            # FIXED: Delay constraint - delay >= start_time - eta
+            model += delay[vi["name"]] >= start_time[vi["name"]] - eta_i
 
         # Non-overlapping constraints
         for i, vi in enumerate(vessels):
@@ -195,6 +204,8 @@ def berth_allocation_optimization(vessels, berth_length):
         for v in vessels:
             start_pos = value(start[v["name"]])
             delay_hours = max(0, value(delay[v["name"]]))  # Ensure non-negative
+            start_time_val = value(start_time[v["name"]])
+            
             allocations.append({
                 "name": v["name"],
                 "type": v["type"],
@@ -204,6 +215,7 @@ def berth_allocation_optimization(vessels, berth_length):
                 "eta_hour": v["eta_hour"],
                 "start": start_pos,
                 "end": start_pos + v["length"],
+                "start_time": start_time_val,
                 "delay": delay_hours
             })
         
@@ -211,12 +223,81 @@ def berth_allocation_optimization(vessels, berth_length):
     
     except Exception as e:
         st.error(f"Error in optimization: {str(e)}")
+        import traceback
+        st.error(f"Detailed error: {traceback.format_exc()}")
+        return []
+
+# -----------------------------
+# Simplified Optimization Model (Alternative)
+# -----------------------------
+def simple_berth_allocation(vessels, berth_length):
+    """Simplified version without time conversion"""
+    try:
+        model = LpProblem("Simple_Berth_Allocation", LpMinimize)
+
+        # Decision variables - only position
+        start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length - v["length"]) for v in vessels}
+        
+        # Simple objective: minimize total starting position (encourage early allocation)
+        model += lpSum(start[v["name"]] for v in vessels)
+
+        # Constraints for each vessel
+        for i, vi in enumerate(vessels):
+            li = vi["length"]
+            # Vessel must fit within berth
+            model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
+
+        # Non-overlapping constraints
+        for i, vi in enumerate(vessels):
+            for j, vj in enumerate(vessels):
+                if i < j:
+                    li = vi["length"]
+                    lj = vj["length"]
+                    M = berth_length * 2
+                    
+                    y_ij = LpVariable(f"y_{vi['name']}_{vj['name']}", cat="Binary")
+                    model += start[vi["name"]] + li <= start[vj["name"]] + M * (1 - y_ij)
+                    model += start[vj["name"]] + lj <= start[vi["name"]] + M * y_ij
+
+        model.solve()
+
+        if LpStatus[model.status] != "Optimal":
+            return []
+
+        # Calculate delay based on position (simplified)
+        allocations = []
+        for v in vessels:
+            start_pos = value(start[v["name"]])
+            # Simplified delay: difference between actual position and ideal position
+            ideal_position = v["eta_hour"] * 50  # ETA hour * 50 meters/hour
+            delay = max(0, (start_pos - ideal_position) / 50)  # Convert to hours
+            
+            allocations.append({
+                "name": v["name"],
+                "type": v["type"],
+                "length": v["length"],
+                "eta": v["eta"],
+                "etd": v["etd"],
+                "eta_hour": v["eta_hour"],
+                "start": start_pos,
+                "end": start_pos + v["length"],
+                "delay": delay
+            })
+        
+        return allocations
+    
+    except Exception as e:
+        st.error(f"Error in simple optimization: {str(e)}")
         return []
 
 # -----------------------------
 # Visualization
 # -----------------------------
 def plot_berth_allocation(allocations, berth_length):
+    if not allocations:
+        st.warning("No allocation data to visualize")
+        return
+        
     fig, ax = plt.subplots(figsize=(14, 8))
     
     ax.set_xlim(0, berth_length)
@@ -287,7 +368,7 @@ def plot_berth_allocation(allocations, berth_length):
     st.pyplot(fig)
 
 # -----------------------------
-# Random Data Generator - FIXED
+# Random Data Generator
 # -----------------------------
 def generate_random_vessels(num_vessels):
     vessel_types = ["Container", "Bulk", "Tanker", "RORO", "Passenger"]
@@ -310,14 +391,14 @@ def generate_random_vessels(num_vessels):
         
         # ETA between 0-23 hours
         eta_hour = random.randint(0, 23)
-        etd_hour = eta_hour + random.randint(4, 12)
+        etd_hour = min(eta_hour + random.randint(4, 12), 23)
         
         vessels.append({
             "name": f"Vessel_{i+1:02d}",
             "type": vtype,
             "length": length,
             "eta": f"{eta_hour:02d}:00",
-            "etd": f"{etd_hour:02d}:00" if etd_hour < 24 else "23:59",
+            "etd": f"{etd_hour:02d}:00",
             "eta_hour": eta_hour
         })
     
@@ -332,16 +413,23 @@ st.markdown("---")
 
 # Sidebar
 st.sidebar.header("⚙️ Simulation Settings")
-num_vessels = st.sidebar.slider("Number of Vessels", 3, 10, 5)
-berth_length = st.sidebar.slider("Total Berth Length (meters)", 300, 2000, 1000, 100)
+num_vessels = st.sidebar.slider("Number of Vessels", 3, 8, 5)
+berth_length = st.sidebar.slider("Total Berth Length (meters)", 500, 2000, 1000, 100)
+
+algorithm_choice = st.sidebar.radio(
+    "Optimization Algorithm",
+    ["Simple Model", "Advanced Model"],
+    index=0,
+    help="Simple: Faster, Advanced: More realistic delay calculation"
+)
 
 st.sidebar.markdown("---")
 st.sidebar.info("""
 **📊 Delay Calculation:**
 - **Units**: Hours
-- **Formula**: (Position / 50) - ETA
-- **Assumption**: 50 meters = 1 hour travel time
-- Negative delays = On time
+- **Simple Model**: Position-based delay
+- **Advanced Model**: Time-based optimization
+- **Conversion**: 50 meters ≈ 1 hour
 """)
 
 # Main content
@@ -349,6 +437,7 @@ col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("🎯 Optimization Control")
+    
     if st.button("🎲 Generate Random Data & Optimize", type="primary"):
         with st.spinner("Generating vessels and solving optimization..."):
             # Generate vessels
@@ -367,11 +456,16 @@ with col1:
                 })
             st.dataframe(display_vessels, use_container_width=True)
             
-            # Run optimization
-            allocations = berth_allocation_optimization(vessels, berth_length)
+            # Run optimization based on choice
+            if algorithm_choice == "Simple Model":
+                allocations = simple_berth_allocation(vessels, berth_length)
+                model_type = "Simple"
+            else:
+                allocations = berth_allocation_optimization(vessels, berth_length)
+                model_type = "Advanced"
             
             if allocations:
-                st.success("✅ Optimization completed successfully!")
+                st.success(f"✅ {model_type} Optimization completed successfully!")
                 
                 # Display results
                 st.subheader("📈 Optimization Results")
@@ -382,8 +476,8 @@ with col1:
                         "Type": alloc["type"],
                         "Length": f"{alloc['length']}m",
                         "ETA": alloc["eta"],
-                        "Start": f"{alloc['start']:.0f}m",
-                        "End": f"{alloc['end']:.0f}m",
+                        "Start Pos": f"{alloc['start']:.0f}m",
+                        "End Pos": f"{alloc['end']:.0f}m",
                         "Delay": f"{alloc['delay']:.2f}h"
                     })
                 st.dataframe(results_df, use_container_width=True)
@@ -399,7 +493,7 @@ with col1:
                 total_used = sum(alloc["length"] for alloc in allocations)
                 utilization = (total_used / berth_length) * 100
                 total_delay = sum(alloc["delay"] for alloc in allocations)
-                avg_delay = total_delay / len(allocations)
+                avg_delay = total_delay / len(allocations) if allocations else 0
                 delayed_vessels = sum(1 for alloc in allocations if alloc["delay"] > 0.1)
                 
                 with col1:
@@ -417,18 +511,22 @@ with col1:
 with col2:
     st.subheader("ℹ️ How It Works")
     st.markdown("""
-    **Optimization Process:**
-    1. Generate random vessel data
-    2. Solve berth allocation problem
-    3. Minimize total delay hours
-    4. Ensure no vessel overlaps
-    5. Visualize results
+    **Optimization Models:**
+    
+    **Simple Model:**
+    - Minimize total position
+    - Calculate delay after optimization
+    - Faster computation
+    
+    **Advanced Model:**
+    - Direct delay minimization
+    - Time-position conversion
+    - More realistic
     
     **Constraints:**
     - Vessels must fit within berth
     - No overlapping allocations  
     - Respect ETA times
-    - Minimize waiting time
     
     **Color Coding:**
     - 🔴 Container
