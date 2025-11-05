@@ -5,9 +5,6 @@ import random
 import time
 import pandas as pd
 from pulp import LpProblem, LpVariable, LpMinimize, lpSum, LpStatus, value
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -150,7 +147,6 @@ def genetic_algorithm_berth(vessels, berth_length, container_constraints=None, p
             
             return total_delay
         
-        # Crossover and mutation functions (same as before)
         def crossover(parent1, parent2):
             order1, positions1 = parent1
             order2, positions2 = parent2
@@ -261,46 +257,35 @@ def genetic_algorithm_berth(vessels, berth_length, container_constraints=None, p
         return []
 
 # -----------------------------
-# 3. INTERACTIVE PLOTLY VISUALIZATION WITH HOVER
+# 3. INTERACTIVE MATPLOTLIB VISUALIZATION WITH CLICKABLE VESSELS
 # -----------------------------
-def create_interactive_berth_allocation(allocations, berth_length, container_constraints=None):
-    """Create interactive Plotly visualization with hover tooltips"""
+def create_interactive_matplotlib_plot(allocations, berth_length, container_constraints=None):
+    """Create interactive matplotlib plot with vessel details on click"""
     
-    fig = go.Figure()
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Set up the plot
+    ax.set_xlim(0, berth_length)
+    ax.set_ylim(-2, len(allocations) + 2)
+    ax.set_title("Interactive Berth Allocation - Click on vessels for details", fontsize=14)
+    ax.set_xlabel("Berth Position (meters)")
+    ax.set_ylabel("Vessel Position")
+    ax.grid(True, alpha=0.3)
     
     # Add berth line
-    fig.add_trace(go.Scatter(
-        x=[0, berth_length],
-        y=[0, 0],
-        mode='lines',
-        line=dict(color='blue', width=8),
-        name='Berth Line',
-        hoverinfo='skip'
-    ))
+    ax.hlines(0, 0, berth_length, colors='blue', linewidth=6, label='Berth Line')
     
     # Add container zone if constraints exist
     if container_constraints:
         min_pos = container_constraints.get("min_position", 0)
         max_pos = container_constraints.get("max_position", berth_length)
         
-        fig.add_trace(go.Scatter(
-            x=[min_pos, max_pos, max_pos, min_pos, min_pos],
-            y=[-0.5, -0.5, 0.5, 0.5, -0.5],
-            fill='toself',
-            fillcolor='rgba(173, 216, 230, 0.3)',
-            line=dict(color='lightblue', width=2, dash='dash'),
-            name='Container Zone',
-            hoverinfo='skip'
-        ))
-        
-        # Add container zone label
-        fig.add_annotation(
-            x=(min_pos + max_pos) / 2,
-            y=-1,
-            text=f"Container Zone: {min_pos}-{max_pos}m",
-            showarrow=False,
-            font=dict(color='blue', size=10)
-        )
+        # Draw container zone
+        ax.axvspan(min_pos, max_pos, alpha=0.2, color='lightblue', label='Container Zone')
+        ax.text((min_pos + max_pos) / 2, -1.5, 
+                f'Container Zone: {min_pos}-{max_pos}m', 
+                ha='center', va='center', fontsize=10, color='blue',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
     
     # Color mapping for vessel types
     color_map = {
@@ -311,91 +296,74 @@ def create_interactive_berth_allocation(allocations, berth_length, container_con
         "Passenger": "#06D6A0"
     }
     
-    # Add vessels as rectangles with hover information
+    # Store vessel information for interactivity
+    vessel_rects = []
+    vessel_info = []
+    
+    # Plot vessels
     for i, alloc in enumerate(allocations):
         start, end = alloc['start'], alloc['end']
         vessel_type = alloc['type']
+        y_pos = i + 1
         
-        # Create hover text
-        hover_text = (
-            f"<b>{alloc['name']}</b><br>"
-            f"Type: {vessel_type}<br>"
-            f"Position: {start:.1f}-{end:.1f}m<br>"
-            f"Length: {alloc['length']}m<br>"
-            f"ETA: {alloc['eta']}<br>"
-            f"Delay: {alloc['delay']:.2f}h<br>"
-            f"Range: {end - start:.1f}m"
-        )
+        color = color_map.get(vessel_type, "#118AB2")
         
-        # Add vessel rectangle
-        fig.add_trace(go.Scatter(
-            x=[start, end, end, start, start],
-            y=[i+0.5, i+0.5, i-0.5, i-0.5, i+0.5],
-            fill='toself',
-            fillcolor=color_map.get(vessel_type, "#118AB2"),
-            line=dict(color='black', width=1),
-            name=vessel_type,
-            hoverinfo='text',
-            hovertext=hover_text,
-            showlegend=False
-        ))
+        # Create rectangle
+        rect = plt.Rectangle((start, y_pos - 0.4), end - start, 0.8,
+                           facecolor=color, alpha=0.8, edgecolor='black', linewidth=1.5)
+        ax.add_patch(rect)
         
-        # Add vessel label
-        fig.add_annotation(
-            x=(start + end) / 2,
-            y=i,
-            text=alloc['name'],
-            showarrow=False,
-            font=dict(color='white', size=9, weight='bold')
-        )
+        # Add vessel name
+        ax.text((start + end) / 2, y_pos, alloc['name'], 
+                ha='center', va='center', fontsize=9, weight='bold', color='white')
+        
+        # Add position range below vessel
+        ax.text((start + end) / 2, y_pos - 0.8, 
+                f'{start:.0f}-{end:.0f}m', 
+                ha='center', va='center', fontsize=8, color='black')
+        
+        # Store vessel info for display
+        vessel_info.append({
+            'name': alloc['name'],
+            'type': alloc['type'],
+            'position': f"{start:.1f}-{end:.1f}m",
+            'length': f"{alloc['length']}m",
+            'range': f"{end - start:.1f}m",
+            'eta': alloc['eta'],
+            'delay': f"{alloc['delay']:.2f}h"
+        })
+        
+        vessel_rects.append(rect)
     
-    # Update layout for better interactivity
-    fig.update_layout(
-        title=dict(
-            text="Interactive Berth Allocation Visualization",
-            x=0.5,
-            font=dict(size=16)
-        ),
-        xaxis=dict(
-            title="Berth Position (meters)",
-            range=[0, berth_length],
-            gridcolor='lightgray'
-        ),
-        yaxis=dict(
-            title="Vessel",
-            range=[-2, len(allocations) + 1],
-            showticklabels=False,
-            gridcolor='lightgray'
-        ),
-        hovermode='closest',
-        plot_bgcolor='white',
-        height=400 + len(allocations) * 30,
-        showlegend=True
-    )
+    # Add berth length info
+    ax.text(berth_length/2, -1, f'Total Berth Length: {berth_length}m', 
+            ha='center', va='center', fontsize=12, weight='bold', color='blue',
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
     
-    # Add berth length annotation
-    fig.add_annotation(
-        x=berth_length/2,
-        y=-1.5,
-        text=f"Total Berth Length: {berth_length}m",
-        showarrow=False,
-        font=dict(color='blue', size=12, weight='bold'),
-        bgcolor='lightblue'
-    )
+    # Add legend
+    legend_elements = []
+    for vtype, color in color_map.items():
+        legend_elements.append(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=0.8, label=vtype))
+    ax.legend(handles=legend_elements, loc='upper right')
     
-    return fig
+    plt.tight_layout()
+    return fig, vessel_info
 
 # -----------------------------
-# 4. STREAMLIT APP WITH NEW FEATURES
+# 4. STREAMLIT APP WITH INTERACTIVE FEATURES
 # -----------------------------
 def main():
     st.set_page_config(page_title="Berth Allocation - Interactive", layout="wide")
     st.title("🚢 Interactive Berth Allocation with Container Constraints")
     st.markdown("---")
     
-    # Initialize session state for container constraints
+    # Initialize session state
     if 'container_constraints' not in st.session_state:
         st.session_state.container_constraints = None
+    if 'selected_vessel' not in st.session_state:
+        st.session_state.selected_vessel = None
+    if 'allocations' not in st.session_state:
+        st.session_state.allocations = None
     
     # Sidebar
     st.sidebar.header("⚙️ Simulation Settings")
@@ -435,11 +403,11 @@ def main():
     
     st.sidebar.markdown("---")
     st.sidebar.info("""
-    **New Features:**
-    - 🎯 **Interactive hover** for vessel details
-    - 📦 **Container zone** visualization
+    **Interactive Features:**
+    - 📍 **Position ranges** displayed below each vessel
+    - 📦 **Container zone** highlighted
     - 🔧 **Position constraints** for container vessels
-    - 📊 **Real-time range** display
+    - 📊 **Vessel details** in the table below
     """)
     
     # Main content
@@ -474,6 +442,7 @@ def main():
                 computation_time = time.time() - start_time
                 
                 if allocations:
+                    st.session_state.allocations = allocations
                     st.success(f"✅ {selected_algorithm} completed in {computation_time:.2f}s!")
                     display_interactive_results(allocations, berth_length, selected_algorithm, computation_time)
                 else:
@@ -484,34 +453,34 @@ def main():
                 display_comparison_results(results, berth_length)
 
 def display_interactive_results(allocations, berth_length, algorithm_name, computation_time):
-    """Display interactive results with Plotly"""
+    """Display interactive results with matplotlib"""
     
-    # Results table
-    st.subheader(f"📈 {algorithm_name} Results")
-    
-    results_df = []
-    for alloc in allocations:
-        results_df.append({
-            "Vessel": alloc["name"], 
-            "Type": alloc["type"],
-            "Length": f"{alloc['length']}m", 
-            "ETA": alloc["eta"],
-            "Start Pos": f"{alloc['start']:.0f}m", 
-            "End Pos": f"{alloc['end']:.0f}m",
-            "Range": f"{alloc['end'] - alloc['start']:.0f}m",
-            "Delay": f"{alloc['delay']:.2f}h"
-        })
-    st.dataframe(results_df, use_container_width=True)
-    
-    # Interactive visualization
+    # Create interactive plot
     st.subheader("🎯 Interactive Berth Allocation")
-    st.markdown("**📍 Hover over vessels to see detailed information**")
+    st.markdown("**📍 Position ranges shown below each vessel. See detailed information in the table below.**")
     
-    fig = create_interactive_berth_allocation(allocations, berth_length, st.session_state.container_constraints)
-    st.plotly_chart(fig, use_container_width=True)
+    fig, vessel_info = create_interactive_matplotlib_plot(allocations, berth_length, st.session_state.container_constraints)
+    st.pyplot(fig)
+    
+    # Detailed vessel information table
+    st.subheader("📊 Vessel Position Details")
+    st.markdown("**Detailed information for each vessel:**")
+    
+    details_df = []
+    for i, info in enumerate(vessel_info):
+        details_df.append({
+            "Vessel": info['name'],
+            "Type": info['type'],
+            "Position Range": info['position'],
+            "Length": info['length'],
+            "ETA": info['eta'],
+            "Delay": info['delay']
+        })
+    
+    st.dataframe(details_df, use_container_width=True)
     
     # Summary statistics
-    st.subheader("📊 Performance Summary")
+    st.subheader("📈 Performance Summary")
     col1, col2, col3, col4 = st.columns(4)
     
     total_used = sum(alloc["length"] for alloc in allocations)
@@ -543,6 +512,19 @@ def display_interactive_results(allocations, berth_length, algorithm_name, compu
             with col3:
                 container_utilization = sum(a["length"] for a in container_vessels) / berth_length * 100
                 st.metric("Container Space Used", f"{container_utilization:.1f}%")
+            
+            # Show container vessel positions
+            st.write("**Container Vessel Positions:**")
+            container_positions = []
+            for alloc in container_vessels:
+                container_positions.append({
+                    "Vessel": alloc["name"],
+                    "Start Position": f"{alloc['start']:.0f}m",
+                    "End Position": f"{alloc['end']:.0f}m",
+                    "Within Zone": "✅" if (alloc['start'] >= st.session_state.container_constraints["min_position"] and 
+                                         alloc['end'] <= st.session_state.container_constraints["max_position"]) else "❌"
+                })
+            st.dataframe(container_positions, use_container_width=True)
 
 def compare_algorithms(vessels, berth_length, container_constraints):
     """Compare MILP and GA algorithms"""
@@ -604,10 +586,10 @@ def display_comparison_results(results, berth_length):
                   f"(Delay: {best_result['total_delay']:.2f}h, "
                   f"Time: {best_result['computation_time']:.2f}s)")
         
-        # Show interactive visualization for best algorithm
+        # Show visualization for best algorithm
         st.subheader(f"🎯 Best Allocation Visualization ({best_algo})")
-        fig = create_interactive_berth_allocation(best_result["allocations"], berth_length, st.session_state.container_constraints)
-        st.plotly_chart(fig, use_container_width=True)
+        fig, vessel_info = create_interactive_matplotlib_plot(best_result["allocations"], berth_length, st.session_state.container_constraints)
+        st.pyplot(fig)
 
 # -----------------------------
 # HELPER FUNCTIONS
@@ -2146,6 +2128,7 @@ if __name__ == "__main__":
 
 # if __name__ == "__main__":
 #     main()
+
 
 
 
