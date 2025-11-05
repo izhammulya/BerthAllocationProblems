@@ -143,7 +143,7 @@ import random
 from pulp import LpProblem, LpVariable, LpMinimize, lpSum, LpStatus, value
 
 # -----------------------------
-# Optimization Model - FIXED
+# FIXED Advanced Optimization Model
 # -----------------------------
 def berth_allocation_optimization(vessels, berth_length):
     try:
@@ -153,14 +153,12 @@ def berth_allocation_optimization(vessels, berth_length):
         start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length - v["length"]) for v in vessels}
         delay = {v["name"]: LpVariable(f"delay_{v['name']}", lowBound=0) for v in vessels}
         
-        # NEW: Variable for time-based start position
-        start_time = {v["name"]: LpVariable(f"start_time_{v['name']}", lowBound=0) for v in vessels}
+        # FIXED: Use scaled position for time calculation
+        conversion_factor = 50  # 50 meters = 1 hour
+        scaled_start = {v["name"]: LpVariable(f"scaled_{v['name']}", lowBound=0) for v in vessels}
 
         # Objective: minimize total delay (in hours)
         model += lpSum(delay[v["name"]] for v in vessels)
-
-        # Conversion factor: meters to hours
-        conversion_factor = 50  # 50 meters = 1 hour
 
         # Constraints for each vessel
         for i, vi in enumerate(vessels):
@@ -170,25 +168,23 @@ def berth_allocation_optimization(vessels, berth_length):
             # Constraint: vessel must fit within berth
             model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
             
-            # FIXED: Convert position to time using constraint
-            # start_time = start_position / conversion_factor
-            model += start_time[vi["name"]] == start[vi["name"]] / conversion_factor
+            # FIXED: Use linear relationship instead of division
+            # scaled_start = start_position / conversion_factor
+            # This becomes: start_position = scaled_start * conversion_factor
+            model += start[vi["name"]] == scaled_start[vi["name"]] * conversion_factor
             
-            # FIXED: Delay constraint - delay >= start_time - eta
-            model += delay[vi["name"]] >= start_time[vi["name"]] - eta_i
+            # Delay constraint: delay >= scaled_start - eta
+            model += delay[vi["name"]] >= scaled_start[vi["name"]] - eta_i
 
         # Non-overlapping constraints
         for i, vi in enumerate(vessels):
             for j, vj in enumerate(vessels):
-                if i < j:  # Only consider each pair once
+                if i < j:
                     li = vi["length"]
                     lj = vj["length"]
                     M = berth_length * 2
                     
-                    # Binary variable for ordering
                     y_ij = LpVariable(f"y_{vi['name']}_{vj['name']}", cat="Binary")
-                    
-                    # Either vi is before vj OR vj is before vi
                     model += start[vi["name"]] + li <= start[vj["name"]] + M * (1 - y_ij)
                     model += start[vj["name"]] + lj <= start[vi["name"]] + M * y_ij
 
@@ -203,8 +199,8 @@ def berth_allocation_optimization(vessels, berth_length):
         allocations = []
         for v in vessels:
             start_pos = value(start[v["name"]])
-            delay_hours = max(0, value(delay[v["name"]]))  # Ensure non-negative
-            start_time_val = value(start_time[v["name"]])
+            delay_hours = max(0, value(delay[v["name"]]))
+            scaled_time = value(scaled_start[v["name"]])
             
             allocations.append({
                 "name": v["name"],
@@ -215,7 +211,7 @@ def berth_allocation_optimization(vessels, berth_length):
                 "eta_hour": v["eta_hour"],
                 "start": start_pos,
                 "end": start_pos + v["length"],
-                "start_time": start_time_val,
+                "start_time": scaled_time,
                 "delay": delay_hours
             })
         
@@ -228,7 +224,7 @@ def berth_allocation_optimization(vessels, berth_length):
         return []
 
 # -----------------------------
-# Simplified Optimization Model (Alternative)
+# Simple Optimization Model
 # -----------------------------
 def simple_berth_allocation(vessels, berth_length):
     """Simplified version without time conversion"""
@@ -238,13 +234,12 @@ def simple_berth_allocation(vessels, berth_length):
         # Decision variables - only position
         start = {v["name"]: LpVariable(f"start_{v['name']}", lowBound=0, upBound=berth_length - v["length"]) for v in vessels}
         
-        # Simple objective: minimize total starting position (encourage early allocation)
+        # Simple objective: minimize total starting position
         model += lpSum(start[v["name"]] for v in vessels)
 
         # Constraints for each vessel
         for i, vi in enumerate(vessels):
             li = vi["length"]
-            # Vessel must fit within berth
             model += start[vi["name"]] + li <= berth_length, f"WithinBerth_{vi['name']}"
 
         # Non-overlapping constraints
@@ -340,7 +335,7 @@ def plot_berth_allocation(allocations, berth_length):
         
         # Vessel name and type
         ax.text(mid_x, y_pos + 0.8, f"{alloc['name']}\n({alloc['type']})", 
-                ha='center', va='bottom', fontsize=9, weight='bold', style='italic')
+                ha='center', va='bottom', fontsize=9, weight='bold')
         
         # Delay information
         delay_text = f"Delay: {alloc['delay']:.1f}h" if alloc['delay'] > 0.1 else "On time"
@@ -390,8 +385,8 @@ def generate_random_vessels(num_vessels):
         length = random.randint(min_len, max_len)
         
         # ETA between 0-23 hours
-        eta_hour = random.randint(0, 23)
-        etd_hour = min(eta_hour + random.randint(4, 12), 23)
+        eta_hour = random.randint(0, 18)  # Reduced range to avoid late allocations
+        etd_hour = min(eta_hour + random.randint(4, 8), 23)
         
         vessels.append({
             "name": f"Vessel_{i+1:02d}",
@@ -405,136 +400,148 @@ def generate_random_vessels(num_vessels):
     return vessels
 
 # -----------------------------
-# Streamlit UI
+# Streamlit UI with Session State
 # -----------------------------
-st.set_page_config(page_title="Berth Allocation", layout="wide")
-st.title("🚢 Berth Allocation Optimization System")
-st.markdown("---")
-
-# Sidebar
-st.sidebar.header("⚙️ Simulation Settings")
-num_vessels = st.sidebar.slider("Number of Vessels", 3, 8, 5)
-berth_length = st.sidebar.slider("Total Berth Length (meters)", 500, 2000, 1000, 100)
-
-algorithm_choice = st.sidebar.radio(
-    "Optimization Algorithm",
-    ["Simple Model", "Advanced Model"],
-    index=0,
-    help="Simple: Faster, Advanced: More realistic delay calculation"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.info("""
-**📊 Delay Calculation:**
-- **Units**: Hours
-- **Simple Model**: Position-based delay
-- **Advanced Model**: Time-based optimization
-- **Conversion**: 50 meters ≈ 1 hour
-""")
-
-# Main content
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("🎯 Optimization Control")
+def main():
+    st.set_page_config(page_title="Berth Allocation", layout="wide")
+    st.title("🚢 Berth Allocation Optimization System")
+    st.markdown("---")
     
-    if st.button("🎲 Generate Random Data & Optimize", type="primary"):
-        with st.spinner("Generating vessels and solving optimization..."):
-            # Generate vessels
-            vessels = generate_random_vessels(num_vessels)
-            
-            # Display generated data
-            st.subheader("📋 Generated Vessel Data")
-            display_vessels = []
-            for v in vessels:
-                display_vessels.append({
-                    "Vessel": v["name"],
-                    "Type": v["type"],
-                    "Length (m)": v["length"],
-                    "ETA": v["eta"],
-                    "ETD": v["etd"]
-                })
-            st.dataframe(display_vessels, use_container_width=True)
-            
-            # Run optimization based on choice
-            if algorithm_choice == "Simple Model":
-                allocations = simple_berth_allocation(vessels, berth_length)
-                model_type = "Simple"
-            else:
-                allocations = berth_allocation_optimization(vessels, berth_length)
-                model_type = "Advanced"
-            
-            if allocations:
-                st.success(f"✅ {model_type} Optimization completed successfully!")
-                
-                # Display results
-                st.subheader("📈 Optimization Results")
-                results_df = []
-                for alloc in allocations:
-                    results_df.append({
-                        "Vessel": alloc["name"],
-                        "Type": alloc["type"],
-                        "Length": f"{alloc['length']}m",
-                        "ETA": alloc["eta"],
-                        "Start Pos": f"{alloc['start']:.0f}m",
-                        "End Pos": f"{alloc['end']:.0f}m",
-                        "Delay": f"{alloc['delay']:.2f}h"
-                    })
-                st.dataframe(results_df, use_container_width=True)
-                
-                # Show visualization
-                st.subheader("📊 Berth Allocation Visualization")
-                plot_berth_allocation(allocations, berth_length)
-                
-                # Summary statistics
-                st.subheader("📊 Performance Summary")
-                col1, col2, col3, col4 = st.columns(4)
-                
-                total_used = sum(alloc["length"] for alloc in allocations)
-                utilization = (total_used / berth_length) * 100
-                total_delay = sum(alloc["delay"] for alloc in allocations)
-                avg_delay = total_delay / len(allocations) if allocations else 0
-                delayed_vessels = sum(1 for alloc in allocations if alloc["delay"] > 0.1)
-                
-                with col1:
-                    st.metric("Berth Utilization", f"{utilization:.1f}%")
-                with col2:
-                    st.metric("Total Delay", f"{total_delay:.1f} hours")
-                with col3:
-                    st.metric("Average Delay", f"{avg_delay:.1f} hours")
-                with col4:
-                    st.metric("Delayed Vessels", f"{delayed_vessels}/{len(allocations)}")
-                
-            else:
-                st.error("❌ No feasible solution found. Try increasing berth length or reducing number of vessels.")
+    # Initialize session state
+    if 'allocations' not in st.session_state:
+        st.session_state.allocations = None
+    if 'vessels' not in st.session_state:
+        st.session_state.vessels = None
+    if 'berth_length' not in st.session_state:
+        st.session_state.berth_length = 1000
 
-with col2:
-    st.subheader("ℹ️ How It Works")
-    st.markdown("""
-    **Optimization Models:**
+    # Sidebar
+    st.sidebar.header("⚙️ Simulation Settings")
+    num_vessels = st.sidebar.slider("Number of Vessels", 3, 8, 5)
+    berth_length = st.sidebar.slider("Total Berth Length (meters)", 500, 2000, 1000, 100)
+    
+    algorithm_choice = st.sidebar.radio(
+        "Optimization Algorithm",
+        ["Simple Model", "Advanced Model"],
+        index=0
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.info("""
+    **📊 Model Differences:**
     
     **Simple Model:**
-    - Minimize total position
-    - Calculate delay after optimization
-    - Faster computation
+    - Optimize positions first
+    - Calculate delay after
+    - Faster & more reliable
     
     **Advanced Model:**
-    - Direct delay minimization
-    - Time-position conversion
+    - Optimize delay directly  
     - More realistic
-    
-    **Constraints:**
-    - Vessels must fit within berth
-    - No overlapping allocations  
-    - Respect ETA times
-    
-    **Color Coding:**
-    - 🔴 Container
-    - 🟢 Bulk Carrier  
-    - 🟡 Tanker
-    - 🟣 RORO
-    - 🔵 Passenger
+    - More complex
     """)
 
-st.markdown("---")
-st.caption("Developed for berth scheduling research | Delay measured in hours")
+    # Main content
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("🎯 Optimization Control")
+        
+        if st.button("🎲 Generate Random Data & Optimize", type="primary", key="optimize_btn"):
+            with st.spinner("Generating vessels and solving optimization..."):
+                # Generate vessels
+                vessels = generate_random_vessels(num_vessels)
+                st.session_state.vessels = vessels
+                st.session_state.berth_length = berth_length
+                
+                # Display generated data
+                st.subheader("📋 Generated Vessel Data")
+                display_vessels = []
+                for v in vessels:
+                    display_vessels.append({
+                        "Vessel": v["name"],
+                        "Type": v["type"],
+                        "Length (m)": v["length"],
+                        "ETA": v["eta"],
+                        "ETD": v["etd"]
+                    })
+                st.dataframe(display_vessels, use_container_width=True)
+                
+                # Run optimization based on choice
+                if algorithm_choice == "Simple Model":
+                    allocations = simple_berth_allocation(vessels, berth_length)
+                    model_type = "Simple"
+                else:
+                    allocations = berth_allocation_optimization(vessels, berth_length)
+                    model_type = "Advanced"
+                
+                st.session_state.allocations = allocations
+                
+                if allocations:
+                    st.success(f"✅ {model_type} Optimization completed successfully!")
+                    display_results(allocations, berth_length)
+                else:
+                    st.error("❌ No feasible solution found. Try increasing berth length or reducing number of vessels.")
+
+        # Show previous results if they exist
+        if st.session_state.allocations and st.button("🔄 Show Previous Results", key="show_previous"):
+            display_results(st.session_state.allocations, st.session_state.berth_length)
+
+    with col2:
+        st.subheader("ℹ️ How It Works")
+        st.markdown("""
+        **Optimization Process:**
+        1. Generate random vessel data
+        2. Solve allocation problem
+        3. Ensure no overlaps
+        4. Minimize delays
+        5. Visualize results
+        
+        **Session State:**
+        - Results are saved
+        - No page reload needed
+        - Click 🔄 to see previous results
+        """)
+
+def display_results(allocations, berth_length):
+    """Display optimization results"""
+    # Display results
+    st.subheader("📈 Optimization Results")
+    results_df = []
+    for alloc in allocations:
+        results_df.append({
+            "Vessel": alloc["name"],
+            "Type": alloc["type"],
+            "Length": f"{alloc['length']}m",
+            "ETA": alloc["eta"],
+            "Start Pos": f"{alloc['start']:.0f}m",
+            "End Pos": f"{alloc['end']:.0f}m",
+            "Delay": f"{alloc['delay']:.2f}h"
+        })
+    st.dataframe(results_df, use_container_width=True)
+    
+    # Show visualization
+    st.subheader("📊 Berth Allocation Visualization")
+    plot_berth_allocation(allocations, berth_length)
+    
+    # Summary statistics
+    st.subheader("📊 Performance Summary")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    total_used = sum(alloc["length"] for alloc in allocations)
+    utilization = (total_used / berth_length) * 100
+    total_delay = sum(alloc["delay"] for alloc in allocations)
+    avg_delay = total_delay / len(allocations) if allocations else 0
+    delayed_vessels = sum(1 for alloc in allocations if alloc["delay"] > 0.1)
+    
+    with col1:
+        st.metric("Berth Utilization", f"{utilization:.1f}%")
+    with col2:
+        st.metric("Total Delay", f"{total_delay:.1f} hours")
+    with col3:
+        st.metric("Average Delay", f"{avg_delay:.1f} hours")
+    with col4:
+        st.metric("Delayed Vessels", f"{delayed_vessels}/{len(allocations)}")
+
+if __name__ == "__main__":
+    main()
